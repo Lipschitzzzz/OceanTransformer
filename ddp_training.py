@@ -6,7 +6,7 @@ from torch.utils.data.distributed import DistributedSampler
 import time
 import os
 import numpy as np
-import nodetransformer
+import elementtransformer
 
 def train_from_pth_ddp(node_data_dir,
     tri_data_dir,
@@ -16,7 +16,6 @@ def train_from_pth_ddp(node_data_dir,
     total_timesteps=144 * 7,
     steps_per_file=144,
     pred_step=1,
-    batch_size=1,
     early_stop_patience=25
 ):
     start_time = time.time()
@@ -26,7 +25,7 @@ def train_from_pth_ddp(node_data_dir,
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(local_rank)
 
-    model = nodetransformer.FVCOMModel(
+    model = elementtransformer.FVCOMModel(
         node=60882, triangle=115443, node_var=13,
         triangle_var=18, embed_dim=256,
         mlp_ratio=4., nhead=2, num_layers=2,
@@ -36,7 +35,7 @@ def train_from_pth_ddp(node_data_dir,
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    full_dataset = nodetransformer.FVCOMDataset(
+    full_dataset = elementtransformer.FVCOMDataset(
         node_data_dir=node_data_dir,
         tri_data_dir=tri_data_dir,
         total_timesteps=total_timesteps,
@@ -49,7 +48,7 @@ def train_from_pth_ddp(node_data_dir,
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     
-    criterion = nodetransformer.WeightedMAEMSELoss().to(device)
+    criterion = elementtransformer.WeightedMAEMSELoss().to(device)
 
     total_samples = len(full_dataset)
     train_size = int(0.8 * total_samples)
@@ -94,13 +93,6 @@ def train_from_pth_ddp(node_data_dir,
             node_y, tri_y = node_y.to(device), tri_y.to(device)
 
             node_pred, tri_pred = model(node_x, tri_x)
-            print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "input node:      ", node_x.shape)
-            print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "input triangle:  ", tri_x.shape)
-            print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "target node:     ", node_y.shape)
-            print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "target triangle: ", tri_y.shape)
-            print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "pred node:       ", node_pred.shape)
-            print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "pred triangle:   ", tri_pred.shape)
-
             loss_node = criterion(node_pred, node_y)
             loss_tri = criterion(tri_pred, tri_y)
             loss = loss_node + loss_tri
@@ -108,14 +100,23 @@ def train_from_pth_ddp(node_data_dir,
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-
             train_loss += loss.item()
+
+            if local_rank == 0:
+                print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "input node:      ", node_x.shape)
+                print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "input triangle:  ", tri_x.shape)
+                print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "target node:     ", node_y.shape)
+                print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "target triangle: ", tri_y.shape)
+                print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "pred node:       ", node_pred.shape)
+                print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "pred triangle:   ", tri_pred.shape)
+
             iter += 1
 
         train_loss /= len(train_loader)
 
         model.eval()
-        val_loss = 0.0
+        val_loss_sum = torch.tensor(0.0, device=device)
+        val_count = torch.tensor(0.0, device=device)
         iter = 0
         with torch.no_grad():
             for (node_x, tri_x), (node_y, tri_y) in val_loader:
@@ -123,27 +124,27 @@ def train_from_pth_ddp(node_data_dir,
                 node_y, tri_y = node_y.to(device), tri_y.to(device)
 
                 node_pred, tri_pred = model(node_x, tri_x)
-                print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "input node:      ", node_x.shape)
-                print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "input triangle:  ", tri_x.shape)
-                print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "target node:     ", node_y.shape)
-                print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "target triangle: ", tri_y.shape)
-                print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "pred node:       ", node_pred.shape)
-                print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "pred triangle:   ", tri_pred.shape)
-
+                
                 loss_node = criterion(node_pred, node_y)
                 loss_tri = criterion(tri_pred, tri_y)
                 loss = loss_node + loss_tri
+                val_loss_sum += loss.detach()
+                val_count += 1
 
                 val_loss += loss.item()
+                if local_rank == 0:
+                    print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "input node:      ", node_x.shape)
+                    print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "input triangle:  ", tri_x.shape)
+                    print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "target node:     ", node_y.shape)
+                    print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "target triangle: ", tri_y.shape)
+                    print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "pred node:       ", node_pred.shape)
+                    print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "pred triangle:   ", tri_pred.shape)
                 iter += 1
 
-        val_loss /= len(val_loader)
+        dist.all_reduce(val_loss_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_count, op=dist.ReduceOp.SUM)
+        val_loss = (val_loss_sum / val_count).item()
         model.train()
-
-        val_loss_tensor = torch.tensor(val_loss, device=device)
-        dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
-        val_loss = val_loss_tensor.item() / world_size
-
         if local_rank == 0:
             print(f"Epoch [{epoch+1}/{start_epoch + num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}, Best: {best_loss:.6f}")
             train_loss_dataset.append(train_loss)
@@ -188,27 +189,28 @@ def train_zero_epoch_ddp(node_data_dir,
     total_timesteps=144 * 7,
     steps_per_file=144,
     pred_step=1,
-    batch_size=1,
     early_stop_patience=25
 ):
     start_time = time.time()
     best_loss = float('inf')
+    early_stop_cnt = 0
     train_loss_dataset = []
     val_loss_dataset = []
+    lr_history = []
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     dist.init_process_group("nccl", rank=local_rank, world_size=world_size)
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(local_rank)
 
-    model = nodetransformer.FVCOMModel(
+    model = elementtransformer.FVCOMModel(
         node=60882, triangle=115443, node_var=13,
         triangle_var=18, embed_dim=256,
         mlp_ratio=4., nhead=2, num_layers=2,
         neighbor_table=None, dropout=0.1
     ).to(device)
 
-    full_dataset = nodetransformer.FVCOMDataset(
+    full_dataset = elementtransformer.FVCOMDataset(
         node_data_dir=node_data_dir,
         tri_data_dir=tri_data_dir,
         total_timesteps=total_timesteps,
@@ -217,9 +219,6 @@ def train_zero_epoch_ddp(node_data_dir,
     )
 
     model = DDP(model, device_ids=[local_rank])
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    criterion = nodetransformer.WeightedMAEMSELoss().to(device)
 
     total_samples = len(full_dataset)
     train_size = int(0.8 * total_samples)
@@ -243,38 +242,55 @@ def train_zero_epoch_ddp(node_data_dir,
         num_workers=2, pin_memory=True
     )
 
+    steps_per_epoch = len(train_loader)
+    total_epochs = 0 + num_epochs
+    total_steps = steps_per_epoch * total_epochs
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
+    criterion = elementtransformer.WeightedMAEMSELoss().to(device)
+
     for epoch in range(num_epochs):
         train_sampler.set_epoch(epoch)
         model.train()
-        train_loss = 0.0
+        train_loss_sum = torch.tensor(0.0, device=device)
+        train_count = torch.tensor(0.0, device=device)
         iter = 0
         for (node_x, tri_x), (node_y, tri_y) in train_loader:
             node_x, tri_x = node_x.to(device), tri_x.to(device)
             node_y, tri_y = node_y.to(device), tri_y.to(device)
 
             node_pred, tri_pred = model(node_x, tri_x)
-            print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "input node:      ", node_x.shape)
-            print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "input triangle:  ", tri_x.shape)
-            print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "target node:     ", node_y.shape)
-            print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "target triangle: ", tri_y.shape)
-            print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "pred node:       ", node_pred.shape)
-            print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "pred triangle:   ", tri_pred.shape)
+            if local_rank == 0 and iter % 20 == 0:
+                print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "input node:      ", node_x.shape)
+                print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "input triangle:  ", tri_x.shape)
+                print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "target node:     ", node_y.shape)
+                print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "target triangle: ", tri_y.shape)
+                print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "pred node:       ", node_pred.shape)
+                print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "pred triangle:   ", tri_pred.shape)
 
             loss_node = criterion(node_pred, node_y)
             loss_tri = criterion(tri_pred, tri_y)
             loss = loss_node + loss_tri
+            train_loss_sum += loss.detach()
+            train_count += 1
+            iter += 1
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            scheduler.step()
 
-            train_loss += loss.item()
-            iter += 1
+        dist.all_reduce(train_loss_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(train_count, op=dist.ReduceOp.SUM)
 
-        train_loss /= len(train_loader)
+        train_loss = (train_loss_sum / train_count).item()
+
+
 
         model.eval()
-        val_loss = 0.0
+        val_loss_sum = torch.tensor(0.0, device=device)
+        val_count = torch.tensor(0.0, device=device)
         iter = 0
         with torch.no_grad():
             for (node_x, tri_x), (node_y, tri_y) in val_loader:
@@ -282,33 +298,35 @@ def train_zero_epoch_ddp(node_data_dir,
                 node_y, tri_y = node_y.to(device), tri_y.to(device)
 
                 node_pred, tri_pred = model(node_x, tri_x)
-                print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "input node:      ", node_x.shape)
-                print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "input triangle:  ", tri_x.shape)
-                print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "target node:     ", node_y.shape)
-                print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "target triangle: ", tri_y.shape)
-                print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "pred node:       ", node_pred.shape)
-                print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "pred triangle:   ", tri_pred.shape)
-
+                
                 loss_node = criterion(node_pred, node_y)
                 loss_tri = criterion(tri_pred, tri_y)
                 loss = loss_node + loss_tri
+                if local_rank == 0 and iter % 20 == 0:
+                    print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "input node:      ", node_x.shape)
+                    print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "input triangle:  ", tri_x.shape)
+                    print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "target node:     ", node_y.shape)
+                    print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "target triangle: ", tri_y.shape)
+                    print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "pred node:       ", node_pred.shape)
+                    print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "pred triangle:   ", tri_pred.shape)
 
-                val_loss += loss.item()
+                val_loss_sum += loss.detach()
+                val_count += 1
                 iter += 1
 
-        val_loss /= len(val_loader)
-        model.train()
-
-        val_loss_tensor = torch.tensor(val_loss, device=device)
-        dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
-        val_loss = val_loss_tensor.item() / world_size
+        dist.all_reduce(val_loss_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_count, op=dist.ReduceOp.SUM)
+        val_loss = (val_loss_sum / val_count).item()
 
         if local_rank == 0:
             print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}, Best: {best_loss:.6f}")
             train_loss_dataset.append(train_loss)
             val_loss_dataset.append(val_loss)
+            lr_history.append(optimizer.param_groups[0]['lr'])
+            
             np.save('train_loss.npy', train_loss_dataset)
             np.save('val_loss.npy', val_loss_dataset)
+            np.save("lr.npy", lr_history)
 
             if val_loss < best_loss:
                 best_loss = val_loss
@@ -319,8 +337,9 @@ def train_zero_epoch_ddp(node_data_dir,
                     'epoch': epoch + 1,
                     'model_state_dict': model.module.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
-                    'val_loss': val_loss,
+                    'scheduler_state_dict': scheduler.state_dict(),
                     'train_loss': train_loss,
+                    'val_loss': val_loss,
                 }, checkpoint_name_out)
 
                 print(f"Model saved at epoch {epoch+1} with val_loss: {val_loss:.6f}")
@@ -328,9 +347,13 @@ def train_zero_epoch_ddp(node_data_dir,
                 early_stop_cnt += 1
                 print(f"No improvement. Current val_loss: {val_loss:.6f}, Best so far: {best_loss:.6f}, Best epoch {best_epoch}")
 
-            if early_stop_cnt > early_stop_patience:
-                print("Early stopped.")
-                break
+        stop_flag = torch.tensor(0, device=device)
+        if local_rank == 0 and early_stop_cnt > early_stop_patience:
+            print("Early stopped.")
+            stop_flag.fill_(1)
+        dist.broadcast(stop_flag, src=0)
+        if stop_flag.item() == 1:
+            break
 
     total_time = time.time() - start_time
     if local_rank == 0:

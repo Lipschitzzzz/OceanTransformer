@@ -27,15 +27,21 @@ def normalization(data, output_name, json_path):
         json.dump(norm_params, f, indent=4)
     print(f"Normalization parameters saved to {json_path}")
 
-def denormalization(normalized_data, json_path):
+def denormalization(normalized_data, pos, var, json_path):
     with open(json_path, 'r') as f:
         params = json.load(f)
-    mins = np.array(params['mins'])[:12]
-    maxs = np.array(params['maxs'])[:12]
+    mins = np.array(params['mins'])
+    maxs = np.array(params['maxs'])
     ranges = maxs - mins
-    if normalized_data.shape[-1] != 12:
-        raise ValueError(f"Expected last dimension=12, got {normalized_data.shape[-1]}")
-    reshape_shape = [1] * (normalized_data.ndim - 1) + [12]
+    if pos == 0:
+        if normalized_data.shape[-1] != 13:
+            raise ValueError(f"Expected last dimension=13, got {normalized_data.shape[-1]}")
+    elif pos == 1:
+        if normalized_data.shape[-1] != 18:
+            raise ValueError(f"Expected last dimension=18, got {normalized_data.shape[-1]}")
+    else:
+        raise ValueError(f"pos expected only 0 or 1")
+    reshape_shape = [1] * (normalized_data.ndim - 1) + [var]
     mins = mins.reshape(reshape_shape)
     ranges = ranges.reshape(reshape_shape)
     original_data = (normalized_data + 1.0) * ranges / 2.0 + mins
