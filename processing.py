@@ -27,16 +27,19 @@ def normalization(data, output_name, json_path):
         json.dump(norm_params, f, indent=4)
     print(f"Normalization parameters saved to {json_path}")
 
-def denormalization(normalized_data, pos, var, json_path):
+def denormalization(normalized_data, pos, json_path):
     with open(json_path, 'r') as f:
         params = json.load(f)
     mins = np.array(params['mins'])
     maxs = np.array(params['maxs'])
     ranges = maxs - mins
+    var = 0
     if pos == 0:
+        var = 13
         if normalized_data.shape[-1] != 13:
             raise ValueError(f"Expected last dimension=13, got {normalized_data.shape[-1]}")
     elif pos == 1:
+        var = 18
         if normalized_data.shape[-1] != 18:
             raise ValueError(f"Expected last dimension=18, got {normalized_data.shape[-1]}")
     else:
@@ -86,11 +89,13 @@ def nc2npy(nc_path_in):
         transposed_triangle = np.transpose(stacked_triangle, (0, 2, 1))
         print(transposed_node.shape)
         print(transposed_triangle.shape)
-        output_name = i.split('.')[0]
-        normalization(transposed_node, 'dataset/node/data/' + output_name + '.npy',
-                    'dataset/node/json/' + output_name + '.json')
-        normalization(transposed_triangle, 'dataset/triangle/data/' + output_name + '.npy',
-                    'dataset/triangle/json/' + output_name + '.json')
+        # output_name = i.split('.')[0]
+        # normalization(transposed_node, 'dataset/node/data/' + output_name + '.npy',
+        #             'dataset/node/json/' + output_name + '.json')
+        # normalization(transposed_triangle, 'dataset/triangle/data/' + output_name + '.npy',
+        #             'dataset/triangle/json/' + output_name + '.json')
+        # np.save('240506node.npy', transposed_node)
+        # np.save('240506triangle.npy', transposed_triangle)
         ds.close()
 
 def npy_normalization(data_in, data_out, json_out):
@@ -123,8 +128,75 @@ def generate_sparse_graph():
 
     return node_edge_index, tri_edge_index, tn_edge_index, nt_edge_index
 
+import json
+import numpy as np
+from pathlib import Path
+
+def merge_min_max_from_jsons(file_paths):
+    """
+    从多个 JSON 文件中合并 mins/maxs：
+      - mins: 逐元素取所有文件中的最小值
+      - maxs: 逐元素取所有文件中的最大值
+      - ranges: 重新计算为 maxs - mins
+    
+    参数:
+        file_paths (list): 7 个 JSON 文件路径列表
+    
+    返回:
+        dict: 合并后的统计字典
+    """
+    if not file_paths:
+        raise ValueError("文件路径列表不能为空")
+    
+    data_list = []
+    for fp in file_paths:
+        with open('dataset/7-json/triangle'+'/'+fp, 'r') as f:
+            data = json.load(f)
+            data_list.append(data)
+    
+    # 检查所有文件的 mins/maxs 长度是否一致
+    first_len = len(data_list[0]['mins'])
+    for i, d in enumerate(data_list):
+        if len(d['mins']) != first_len or len(d['maxs']) != first_len:
+            raise ValueError(f"文件 {file_paths[i]} 的 mins 或 maxs 长度不匹配")
+    
+    # 转为 numpy 数组
+    all_mins = np.array([d['mins'] for d in data_list])   # shape: (7, D)
+    all_maxs = np.array([d['maxs'] for d in data_list])   # shape: (7, D)
+    
+    # 逐元素取 min 和 max
+    merged_mins = np.min(all_mins, axis=0)   # shape: (D,)
+    merged_maxs = np.max(all_maxs, axis=0)   # shape: (D,)
+    merged_ranges = merged_maxs - merged_mins
+    
+    # 元数据一致性检查
+    meta_keys = ['shape_before_normalization', 'normalized_range']
+    merged = {
+        'mins': merged_mins.tolist(),
+        'maxs': merged_maxs.tolist(),
+        'ranges': merged_ranges.tolist(),
+    }
+    
+    for key in meta_keys:
+        first_val = data_list[0][key]
+        for d in data_list[1:]:
+            if d[key] != first_val:
+                raise ValueError(f"元数据字段 '{key}' 在不同文件中不一致！")
+        merged[key] = first_val
+    
+    return merged
+
+
 if __name__ == "__main__":
-    nc2npy('dataset')
-
-
+    # nc2npy('dataset/nc')
+    files = os.listdir('dataset/7-json/triangle')
+    print(files)
+    try:
+        result = merge_min_max_from_jsons(files)
+        # 可选：保存结果到新文件
+        with open("dataset/7-json/triangle/averaged_stats_triangle.json", "w") as f:
+            json.dump(result, f, indent=4)
+        print("saved averaged_stats.json")
+    except Exception as e:
+        print("error: ", e)
     # npy_normalization('D:/FVCOM/1hour/data', 'D:/FVCOM/1hour/normalized_data', 'D:/FVCOM/1hour/json')
