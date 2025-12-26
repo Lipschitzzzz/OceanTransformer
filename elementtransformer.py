@@ -8,67 +8,79 @@ import processing
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import softmax
 
+import os
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
 class FVCOMDataset(Dataset):
     def __init__(
         self,
         node_data_dir: str,
         tri_data_dir: str,
-        total_timesteps: int = 144 * 7,
-        steps_per_file: int = 144,
-        pred_step: int = 1
+        total_timesteps: int = 24 * 7,   # e.g., 7 days
+        steps_per_file: int = 24,        # 1 file = 1 day = 24 steps
+        t_in: int = 6,
+        t_out: int = 6,
     ):
         self.node_data_dir = node_data_dir
         self.tri_data_dir = tri_data_dir
         self.steps_per_file = steps_per_file
-        self.pred_step = pred_step
+        self.t_in = t_in
+        self.t_out = t_out
+        self.total_timesteps = total_timesteps
+
+        assert steps_per_file % t_in == 0, f"steps_per_file ({steps_per_file}) must be divisible by t_in ({t_in})"
+        assert steps_per_file % t_out == 0, f"steps_per_file ({steps_per_file}) must be divisible by t_out ({t_out})"
+        assert total_timesteps % t_in == 0, f"total_timesteps ({total_timesteps}) must be divisible by t_in ({t_in})"
 
         self.node_files = sorted([f for f in os.listdir(node_data_dir) if f.endswith('.npy')])
         self.tri_files = sorted([f for f in os.listdir(tri_data_dir) if f.endswith('.npy')])
+        assert len(self.node_files) == len(self.tri_files), "Node and triangle file counts must match!"
 
-        assert len(self.node_files) == len(self.tri_files), "Number of node and triangle files must match!"
-        
-        self.total_timesteps = total_timesteps
-        self.max_start_t = total_timesteps - pred_step - 1
-        if self.max_start_t < 0:
-            raise ValueError(f"pred_step={pred_step} too large for total_timesteps={total_timesteps}")
-        self.total_samples = self.max_start_t + 1
+        self.num_blocks = total_timesteps // t_in
+        self.total_samples = self.num_blocks - 1  # last block has no target
+
+        if self.total_samples <= 0:
+            raise ValueError(f"Not enough data: need at least {t_in * 2} timesteps")
 
     def _global_to_local(self, global_t: int):
-        file_idx = global_t // self.steps_per_file
-        local_t = global_t % self.steps_per_file
-        return file_idx, local_t
+        return global_t // self.steps_per_file, global_t % self.steps_per_file
 
-    def _load_sequence(self, data_dir: str, files: list, global_t: int, length: int):
-        file_idx, local_t = self._global_to_local(global_t)
+    def _load_sequence(self, data_dir: str, files: list, start_t: int, length: int):
+        """
+        Load sequence assuming it lies entirely within one file.
+        Only valid when blocks are aligned with file boundaries.
+        """
+        file_idx, local_t = self._global_to_local(start_t)
         if local_t + length > self.steps_per_file:
             raise RuntimeError(
-                f"Sample crosses file boundary at t={global_t}. "
-                "Either reduce pred_step or implement cross-file loading."
+                f"Sequence [t={start_t}, t+{length}) crosses file boundary. "
+                "This should not happen if steps_per_file is divisible by t_in/t_out."
             )
         path = os.path.join(data_dir, files[file_idx])
         data = np.load(path)
-        seq = data[local_t : local_t + length]
-        return seq
+        return data[local_t : local_t + length]
 
     def __len__(self):
         return self.total_samples
 
     def __getitem__(self, idx: int):
-        t_input = idx
-        t_target = idx + self.pred_step
+        input_start = idx * self.t_in
+        target_start = input_start + self.t_in
 
-        node_input = self._load_sequence(self.node_data_dir, self.node_files, t_input, self.pred_step).squeeze(0)
-        tri_input = self._load_sequence(self.tri_data_dir, self.tri_files, t_input, self.pred_step).squeeze(0)
+        node_in = self._load_sequence(self.node_data_dir, self.node_files, input_start, self.t_in)
+        tri_in = self._load_sequence(self.tri_data_dir, self.tri_files, input_start, self.t_in)
 
-        node_target = self._load_sequence(self.node_data_dir, self.node_files, t_target, 1).squeeze(0)
-        tri_target = self._load_sequence(self.tri_data_dir, self.tri_files, t_target, 1).squeeze(0)
+        node_out = self._load_sequence(self.node_data_dir, self.node_files, target_start, self.t_out)
+        tri_out = self._load_sequence(self.tri_data_dir, self.tri_files, target_start, self.t_out)
 
         return (
-            torch.from_numpy(node_input).float(),
-            torch.from_numpy(tri_input).float()
+            torch.from_numpy(node_in).float(),
+            torch.from_numpy(tri_in).float()
         ), (
-            torch.from_numpy(node_target).float(),
-            torch.from_numpy(tri_target).float()
+            torch.from_numpy(node_out).float(),
+            torch.from_numpy(tri_out).float()
         )
 
 class SinusoidalPositionalEncoding(nn.Module):
@@ -155,84 +167,147 @@ class NodeSparseSelfAttention(MessagePassing):
         super().__init__(aggr='add')
         self.in_channels = in_channels
         self.out_channels = out_channels
-        
         self.q_proj = nn.Linear(in_channels, out_channels)
         self.k_proj = nn.Linear(in_channels, out_channels)
         self.v_proj = nn.Linear(in_channels, out_channels)
         self.scale = out_channels ** 0.5
 
     def forward(self, x, edge_index, size=None):
-        # x: [nnode, in_channels]
-        # edge_index: [2, E]
-        return self.propagate(edge_index, x=x, size=size)
+        """
+        x: [t, N, in_channels]
+        edge_index: [2, E]
+        returns: [t, N, out_channels]
+        """
+        t, num_nodes, _ = x.shape
+        E = edge_index.size(1)
 
-    def message(self, x_i, x_j, index, size_i=None):
-        # x_i: source (target node), x_j: neighbor (source node)
-        Q = self.q_proj(x_i)          # [E, out]
-        K = self.k_proj(x_j)          # [E, out]
-        V = self.v_proj(x_j)          # [E, out]
+        output = torch.empty(t, num_nodes, self.out_channels, 
+                             device=x.device, dtype=x.dtype)
+
+        for i in range(t):
+            out_i = self.propagate(edge_index, x=x[i], size=size)
+            output[i] = out_i
+
+        return output
+
+    def message(self, x_i, x_j, index, ptr, size_i):
+        # x_i: target nodes (中心节点), x_j: source nodes (邻居)
+        Q = self.q_proj(x_i)  # [E, out]
+        K = self.k_proj(x_j)  # [E, out]
+        V = self.v_proj(x_j)  # [E, out]
+
         attn_logits = (Q * K).sum(dim=-1) / self.scale  # [E]
-        attn_logits = attn_logits.flatten()
-        attn_weights = softmax(attn_logits, index, num_nodes=size_i)
-        return attn_weights.unsqueeze(-1) * V           # [E, out]
+        attn_weights = softmax(attn_logits, index, num_nodes=size_i)  # [E]
+        return attn_weights.unsqueeze(-1) * V  # [E, out]
 
     def update(self, aggr_out, x):
-        return aggr_out  # [nnode, out_channels]
+        return aggr_out  # [N, out_channels]
 
 class TriangleSparseSelfAttention(MessagePassing):
     def __init__(self, in_channels, out_channels):
         super().__init__(aggr='add')
+        self.in_channels = in_channels
+        self.out_channels = out_channels
         self.q_proj = nn.Linear(in_channels, out_channels)
         self.k_proj = nn.Linear(in_channels, out_channels)
         self.v_proj = nn.Linear(in_channels, out_channels)
         self.scale = out_channels ** 0.5
 
     def forward(self, x, edge_index, size=None):
-        return self.propagate(edge_index, x=x, size=size)
+        """
+        x: [t, M, in_channels]
+        edge_index: [2, E_tri]
+        returns: [t, M, out_channels]
+        """
+        t, num_tris, _ = x.shape
+        E = edge_index.size(1)
 
-    def message(self, x_i, x_j, index, size_i=None):
+        output = torch.empty(t, num_tris, self.out_channels,
+                             device=x.device, dtype=x.dtype)
+
+        for i in range(t):
+            out_i = self.propagate(edge_index, x=x[i], size=size)
+            output[i] = out_i
+
+        return output
+
+    def message(self, x_i, x_j, index, ptr, size_i):
         Q = self.q_proj(x_i)
         K = self.k_proj(x_j)
         V = self.v_proj(x_j)
-        
+
         attn_logits = (Q * K).sum(dim=-1) / self.scale
-        attn_logits = attn_logits.flatten()
         attn_weights = softmax(attn_logits, index, num_nodes=size_i)
         return attn_weights.unsqueeze(-1) * V
 
     def update(self, aggr_out, x):
         return aggr_out
-    
+
 class NodeToTriangleCrossAttention(MessagePassing):
     def __init__(self, node_dim, tri_dim, hidden_dim, dropout=0.0):
         super().__init__(aggr='add')
-        self.q = nn.Linear(tri_dim, hidden_dim)
-        self.k = nn.Linear(node_dim, hidden_dim)
-        self.v = nn.Linear(node_dim, hidden_dim)
+        self.q = nn.Linear(tri_dim, hidden_dim)      # Query from triangle (target)
+        self.k = nn.Linear(node_dim, hidden_dim)     # Key from node (source)
+        self.v = nn.Linear(node_dim, hidden_dim)     # Value from node (source)
         self.out = nn.Linear(hidden_dim, tri_dim)
         self.dropout = nn.Dropout(dropout)
         self.scale = hidden_dim ** -0.5
 
     def forward(self, x_tri, x_node, nt_edge_index, size=None, return_attn=False):
-        return self.propagate(
-            nt_edge_index, 
-            x=(x_node, x_tri), 
-            size=size, 
-            return_attn=return_attn
-        )
+        # x_tri: [t, M, tri_dim]
+        # x_node: [t, N, node_dim]
+        t, num_tris, tri_dim = x_tri.shape
+        _, num_nodes, node_dim = x_node.shape
+        E = nt_edge_index.size(1)
 
-    def message(self, x_i, x_j, index, size_i=None, return_attn=False):
-        q = self.q(x_j); k = self.k(x_i); v = self.v(x_i)
-        alpha = (q * k).sum(dim=-1) * self.scale
+        output = torch.empty(t, num_tris, tri_dim, device=x_tri.device, dtype=x_tri.dtype)
+        
+        if return_attn:
+            attn_output = torch.empty(t, E, device=x_tri.device, dtype=x_tri.dtype)
+        else:
+            attn_output = None
+
+        for i in range(t):
+            res = self.propagate(
+                nt_edge_index,
+                x=(x_node[i], x_tri[i]),   # (source=node, target=triangle)
+                size=size,
+                return_attn=return_attn
+            )
+            
+            if return_attn:
+                out, attn = res
+                output[i] = out
+                attn_output[i] = attn
+            else:
+                output[i] = res
+
+        if return_attn:
+            return output, attn_output
+        else:
+            return output
+
+    def message(self, x_i, x_j, index, ptr, size_i, return_attn):
+        # x_i: source (node features) -> [E, node_dim]
+        # x_j: target (triangle features) -> [E, tri_dim]
+        q = self.q(x_j)      # triangle's query
+        k = self.k(x_i)      # node's key
+        v = self.v(x_i)      # node's value
+        alpha = (q * k).sum(dim=-1) * self.scale  # [E]
         alpha = softmax(alpha, index, num_nodes=size_i)
         alpha = self.dropout(alpha)
-        if return_attn: self._alpha = alpha
-        return alpha.unsqueeze(-1) * v
+        if return_attn:
+            self._alpha = alpha
+        return alpha.unsqueeze(-1) * v  # [E, hidden_dim]
+
     def update(self, aggr_out, x, return_attn):
-        x_dst = x[1]
-        out = self.out(aggr_out) + x_dst
-        return (out, self._alpha) if return_attn else out
-        
+        x_dst = x[1]  # original triangle features: [M, tri_dim]
+        out = self.out(aggr_out) + x_dst  # residual connection
+        if return_attn:
+            return out, self._alpha
+        else:
+            return out
+
 class TriangleToNodeCrossAttention(MessagePassing):
     def __init__(self, tri_dim, node_dim, hidden_dim, dropout=0.0):
         super().__init__(aggr='add')
@@ -244,25 +319,61 @@ class TriangleToNodeCrossAttention(MessagePassing):
         self.scale = hidden_dim ** -0.5
 
     def forward(self, x_node, x_tri, tn_edge_index, size=None, return_attn=False):
-        return self.propagate(
-            tn_edge_index, 
-            x=(x_tri, x_node),
-            size=size, 
-            return_attn=return_attn
-        )
+        # x_node: [t, N, node_dim]
+        # x_tri:  [t, M, tri_dim]
+        t, num_nodes, node_dim = x_node.shape
+        _, num_tris, tri_dim = x_tri.shape
+        E = tn_edge_index.size(1)
 
-    def message(self, x_i, x_j, index, size_i=None, return_attn=False):
-        q = self.q(x_j); k = self.k(x_i); v = self.v(x_i)
-        alpha = (q * k).sum(dim=-1) * self.scale
-        alpha = softmax(alpha, index, num_nodes=size_i)
+        output = torch.empty(t, num_nodes, node_dim, device=x_node.device, dtype=x_node.dtype)
+        
+        if return_attn:
+            attn_output = torch.empty(t, E, device=x_node.device, dtype=x_node.dtype)
+        else:
+            attn_output = None
+
+        for i in range(t):
+            res = self.propagate(
+                tn_edge_index,
+                x=(x_tri[i], x_node[i]),   # (source=tri, target=node)
+                size=size,
+                return_attn=return_attn
+            )
+            
+            if return_attn:
+                out, attn = res
+                output[i] = out
+                attn_output[i] = attn
+            else:
+                output[i] = res
+
+        if return_attn:
+            return output, attn_output
+        else:
+            return output
+
+    def message(self, x_i, x_j, index, ptr, size_i, return_attn):
+        q = self.q(x_j)      # [E, hidden_dim], target (node)
+        k = self.k(x_i)      # [E, hidden_dim], source (tri)
+        v = self.v(x_i)      # [E, hidden_dim]
+
+        alpha = (q * k).sum(dim=-1) * self.scale  # [E]
+        alpha = softmax(alpha, index, num_nodes=size_i)  # [E]
         alpha = self.dropout(alpha)
-        if return_attn: self._alpha = alpha
-        return alpha.unsqueeze(-1) * v
+
+        if return_attn:
+            self._alpha = alpha
+
+        return alpha.unsqueeze(-1) * v  # [E, hidden_dim]
 
     def update(self, aggr_out, x, return_attn):
-        x_dst = x[1]
-        out = self.out(aggr_out) + x_dst
-        return (out, self._alpha) if return_attn else out
+        x_dst = x[1]  # [N, node_dim], original target node features
+        out = self.out(aggr_out) + x_dst  # residual connection
+        
+        if return_attn:
+            return out, self._alpha
+        else:
+            return out
 
 class CrossAttentionTransformer(nn.Module):
     def __init__(self, embed_dim=256, nhead=1, dropout=0.1, mlp_ratio=4, node=60882, triangle=115443,):
@@ -381,48 +492,100 @@ class Encoder(nn.Module):
     def forward(self, node, triangle):
         node = node.squeeze(0)
         triangle = triangle.squeeze(0)
-        N_node, C_node = node.shape
-        N_triangle, C_triangle = triangle.shape
+        print('-1', node.shape, triangle.shape)
+        T_node, N_node, C_node = node.shape
+        T_triangle, N_triangle, C_triangle = triangle.shape
         assert N_node == self.node, f"Expected {self.node} nodes, got {N_node}"
         assert N_triangle == self.triangle, f"Expected {self.triangle} triangles, got {N_triangle}"
         assert C_node == self.node_var, f"Expected {self.node_var} node features, got {C_node}"
         assert C_triangle == self.triangle_var, f"Expected {self.triangle_var} triangle features, got {C_triangle}"
+        print('0', node.shape, triangle.shape)
         node = self.node_embedding_layer(node)
         triangle = self.triangle_embedding_layer(triangle)
-
+        print('1', node.shape, triangle.shape)
         for layer in self.layers:
             node, triangle = layer(node, triangle)
+            print('2', node.shape, triangle.shape)
 
+        print('3', node.shape, triangle.shape)
         return node, triangle
 
-class Decoder(nn.Module):
-    def __init__(self, node_var=11, triangle_var=18, embed_dim=256, dropout=0.1):
+class MultiStepPredictionHead(nn.Module):
+    def __init__(self, embed_dim, t_in, t_out, out_dim, dropout=0.1):
         super().__init__()
-        self.node_head = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, embed_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(embed_dim // 2, node_var)
-        )
+        self.t_in = t_in
+        self.t_out = t_out
+        self.out_dim = out_dim
         
-        self.triangle_head = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, embed_dim // 2),
+        self.head = nn.Sequential(
+            nn.LayerNorm(t_in * embed_dim),
+            nn.Linear(t_in * embed_dim, t_in * embed_dim // 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(embed_dim // 2, triangle_var)
+            nn.Linear(t_in * embed_dim // 2, t_out * out_dim)
+        )
+
+    def forward(self, x):
+        # x: [t_in, N, C]
+        t, n, c = x.shape
+        assert t == self.t_in, f"Expected t={self.t_in}, got {t}"
+        
+        x = x.permute(1, 0, 2).reshape(n, -1)  # [N, t_in * C]
+        print('x', x.shape)
+        out = self.head(x)                    # [N, t_out * out_dim]
+        out = out.reshape(n, self.t_out, self.out_dim).permute(1, 0, 2)  # [t_out, N, out_dim]
+        return out
+
+class Decoder(nn.Module):
+    def __init__(self, node_var=11, triangle_var=18, embed_dim=256, t_in=6, t_out=6, dropout=0.1):
+        super().__init__()
+        # self.node_head = nn.Sequential(
+        #     nn.LayerNorm(embed_dim),
+        #     nn.Linear(embed_dim, embed_dim // 2),
+        #     nn.GELU(),
+        #     nn.Dropout(dropout),
+        #     nn.Linear(embed_dim // 2, node_var)
+        # )
+        
+        # self.triangle_head = nn.Sequential(
+        #     nn.LayerNorm(embed_dim),
+        #     nn.Linear(embed_dim, embed_dim // 2),
+        #     nn.GELU(),
+        #     nn.Dropout(dropout),
+        #     nn.Linear(embed_dim // 2, triangle_var)
+        # )
+
+        self.node_pred_head = MultiStepPredictionHead(
+            embed_dim=embed_dim,
+            t_in=t_in,
+            t_out=t_out,
+            out_dim=node_var,
+            dropout=dropout
+        )
+
+        self.tri_pred_head = MultiStepPredictionHead(
+            embed_dim=embed_dim,
+            t_in=t_in,
+            t_out=t_out,
+            out_dim=triangle_var,
+            dropout=dropout
         )
 
     def forward(self, node, triangle):
-        node_pred = self.node_head(node)
-        triangle_pred = self.triangle_head(triangle)
+        print('4', node.shape, triangle.shape)
+        node_pred = self.node_pred_head(node)      # [t_out, N, node_var]
+        triangle_pred = self.tri_pred_head(triangle)         # [t_out, M, triangle_var]
+
+        # node_pred = self.node_head(node)
+        # triangle_pred = self.triangle_head(triangle)
+        print('5', node.shape, triangle.shape)
         return node_pred, triangle_pred
 
 class ElementTransformerNet(nn.Module):
     def __init__(self, node=60882, triangle=115443, node_var=13,
                  triangle_var=18, embed_dim=256,
                  mlp_ratio=4., nhead=2, num_layers=2,
+                 t_in=6, t_out=6,
                  neighbor_table=None, dropout=0.1):
         super().__init__()
         self.encoder = Encoder(
@@ -440,13 +603,15 @@ class ElementTransformerNet(nn.Module):
         self.decoder = Decoder(
             embed_dim=embed_dim,
             node_var=node_var,
+            t_in=t_in,
+            t_out=t_out,
             triangle_var=triangle_var
         )
 
     def forward(self, node, triangle):
         node, triangle = self.encoder(node, triangle)
         node, triangle = self.decoder(node, triangle)
-        return node.unsqueeze(0), triangle.unsqueeze(0)
+        return node, triangle
     
     def predict(self, node_input_data, triangle_input_data, checkpoint_name):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -465,11 +630,13 @@ class ElementTransformerNet(nn.Module):
 def FVCOMModel(node=60882, triangle=115443, node_var=13,
                triangle_var=18, embed_dim=256,
                mlp_ratio=4., nhead=2, num_layers=2,
+               t_in=6, t_out=6,
                neighbor_table=None, dropout=0.1):
     
     model = ElementTransformerNet(node=node, triangle=triangle, node_var=node_var,
                                   triangle_var=triangle_var, embed_dim=embed_dim,
                                   mlp_ratio=mlp_ratio, nhead=nhead, num_layers=num_layers,
+                                  t_in=t_in, t_out=t_out,
                                   neighbor_table=neighbor_table, dropout=dropout)
     return model
 

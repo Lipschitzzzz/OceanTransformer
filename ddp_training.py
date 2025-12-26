@@ -186,9 +186,10 @@ def train_zero_epoch_ddp(node_data_dir,
     tri_data_dir,
     num_epochs,
     checkpoint_name_out,
-    total_timesteps=144 * 7,
-    steps_per_file=144,
-    pred_step=1,
+    total_timesteps=24 * 7,
+    steps_per_file=24,
+    t_in=6,
+    t_out=6,
     early_stop_patience=25
 ):
     start_time = time.time()
@@ -207,6 +208,7 @@ def train_zero_epoch_ddp(node_data_dir,
         node=60882, triangle=115443, node_var=13,
         triangle_var=18, embed_dim=256,
         mlp_ratio=4., nhead=2, num_layers=2,
+        t_in=t_in, t_out=t_out,
         neighbor_table=None, dropout=0.1
     ).to(device)
 
@@ -215,7 +217,7 @@ def train_zero_epoch_ddp(node_data_dir,
         tri_data_dir=tri_data_dir,
         total_timesteps=total_timesteps,
         steps_per_file=steps_per_file,
-        pred_step=pred_step
+        t_in=t_in, t_out=t_out
     )
 
     model = DDP(model, device_ids=[local_rank])
@@ -258,7 +260,7 @@ def train_zero_epoch_ddp(node_data_dir,
         iter = 0
         for (node_x, tri_x), (node_y, tri_y) in train_loader:
             node_x, tri_x = node_x.to(device), tri_x.to(device)
-            node_y, tri_y = node_y.to(device), tri_y.to(device)
+            node_y, tri_y = node_y.squeeze(0).to(device), tri_y.squeeze(0).to(device)
 
             node_pred, tri_pred = model(node_x, tri_x)
             if local_rank == 0 and iter % 20 == 0:
@@ -295,7 +297,7 @@ def train_zero_epoch_ddp(node_data_dir,
         with torch.no_grad():
             for (node_x, tri_x), (node_y, tri_y) in val_loader:
                 node_x, tri_x = node_x.to(device), tri_x.to(device)
-                node_y, tri_y = node_y.to(device), tri_y.to(device)
+                node_y, tri_y = node_y.squeeze(0).to(device), tri_y.squeeze(0).to(device)
 
                 node_pred, tri_pred = model(node_x, tri_x)
                 
@@ -377,11 +379,11 @@ def main():
     # total_timesteps=144,
     # pred_step=1,
     # batch_size=1)
-    train_from_pth_ddp(node_data_dir="dataset/node/data/",
-                       tri_data_dir="dataset/triangle/data/",
+    train_from_pth_ddp(node_data_dir='dataset/node/data/',
+                       tri_data_dir='dataset/triangle/data/',
                        num_epochs=100,
-                       checkpoint_name_out="checkpoints/" + timestamp_str+ "_2A100.pth",
-                       checkpoint_path='checkpoints/2025_12_11_13_59_2A100.pth',
+                       checkpoint_name_out='checkpoints/' + timestamp_str + '_2A100.pth',
+                       checkpoint_path='checkpoints/' + timestamp_str + '2A100.pth',
                        total_timesteps=24*(30+31+30+31),
                        steps_per_file=24,
                        pred_step= 1,

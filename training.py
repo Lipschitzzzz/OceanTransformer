@@ -10,14 +10,15 @@ import processing
 
 def training_test():
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    T = 6
     N_node = 60882
     N_tri = 115443
     node_in_dim = 13
     triangle_in_dim = 18
     embed_dim=256
 
-    node_feat = torch.randn(1, N_node, node_in_dim).to(device)
-    triangle_feat = torch.randn(1, N_tri, triangle_in_dim).to(device)
+    node_feat = torch.randn(T, N_node, node_in_dim).to(device)
+    triangle_feat = torch.randn(T, N_tri, triangle_in_dim).to(device)
 
     print(f"Input shapes:")
     print(f"  node_feat: {node_feat.shape}")
@@ -31,7 +32,7 @@ def training_test():
     ).to(device)
 
     with torch.no_grad():
-        node_pred, triangle_pred = model.predict(node_feat, triangle_feat, 'checkpoints/2025_12_12_11_24_2A100.pth')
+        node_pred, triangle_pred = model(node_feat, triangle_feat)
     print(node_pred.shape)
     print(triangle_pred.shape)
 
@@ -42,10 +43,11 @@ def training(
     tri_data_dir,
     num_epochs,
     checkpoint_name_out,
-    total_timesteps=144 * 7,
-    steps_per_file=144,
-    pred_step=1,
+    total_timesteps=24,
+    steps_per_file=24,
     batch_size=1,
+    t_in=1,
+    t_out=1,
     early_stop_patience=25
 ):
     start_time = time.time()
@@ -59,10 +61,11 @@ def training(
         tri_data_dir=tri_data_dir,
         total_timesteps=total_timesteps,
         steps_per_file=steps_per_file,
-        pred_step=pred_step
+        t_in=t_in, t_out=t_out
     )
 
     total_samples = len(full_dataset)
+    print(total_samples)
     train_size = int(0.8 * total_samples)
     val_size = total_samples - train_size
 
@@ -79,6 +82,7 @@ def training(
         node=60882, triangle=115443, node_var=13,
         triangle_var=18, embed_dim=256,
         mlp_ratio=4., nhead=2, num_layers=2,
+        t_in=t_in, t_out=t_out,
         neighbor_table=None, dropout=0.1
     ).to(device)
 
@@ -91,7 +95,7 @@ def training(
         iter = 0
         for (node_x, tri_x), (node_y, tri_y) in train_loader:
             node_x, tri_x = node_x.to(device), tri_x.to(device)
-            node_y, tri_y = node_y.to(device), tri_y.to(device)
+            node_y, tri_y = node_y.squeeze(0).to(device), tri_y.squeeze(0).to(device)
 
             node_pred, tri_pred = model(node_x, tri_x)
             print("Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "input node:      ", node_x.shape)
@@ -121,7 +125,7 @@ def training(
         with torch.no_grad():
             for (node_x, tri_x), (node_y, tri_y) in val_loader:
                 node_x, tri_x = node_x.to(device), tri_x.to(device)
-                node_y, tri_y = node_y.to(device), tri_y.to(device)
+                node_y, tri_y = node_y.squeeze(0).to(device), tri_y.squeeze(0).to(device)
 
                 node_pred, tri_pred = model(node_x, tri_x)
                 print("Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "input node:      ", node_x.shape)
@@ -182,7 +186,6 @@ if __name__ == "__main__":
     tri_data_dir="dataset/triangle/data/",
     num_epochs=100,
     checkpoint_name_out="checkpoints/" + timestamp_str+ "_best_model.pth",
-    total_timesteps=144,
-    pred_step=1,
+    total_timesteps=6,
     batch_size=1)
     
