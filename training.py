@@ -46,8 +46,8 @@ def training(
     total_timesteps=24,
     steps_per_file=24,
     batch_size=1,
-    t_in=1,
-    t_out=1,
+    t_in=6,
+    t_out=6,
     early_stop_patience=25
 ):
     start_time = time.time()
@@ -80,7 +80,7 @@ def training(
 
     model = elementtransformer.FVCOMModel(
         node=60882, triangle=115443, node_var=5,
-        triangle_var=6, embed_dim=256,
+        triangle_var=6, embed_dim=64,
         mlp_ratio=4., nhead=2, num_layers=2,
         t_in=t_in, t_out=t_out,
         neighbor_table=None, dropout=0.1
