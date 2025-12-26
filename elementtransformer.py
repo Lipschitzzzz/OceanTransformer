@@ -167,9 +167,9 @@ class NodeSparseSelfAttention(MessagePassing):
         super().__init__(aggr='add')
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.q_proj = nn.Linear(in_channels, out_channels)
-        self.k_proj = nn.Linear(in_channels, out_channels)
-        self.v_proj = nn.Linear(in_channels, out_channels)
+        self.q = nn.Linear(in_channels, out_channels)
+        self.k = nn.Linear(in_channels, out_channels)
+        self.v = nn.Linear(in_channels, out_channels)
         self.scale = out_channels ** 0.5
 
     def forward(self, x, edge_index, size=None):
@@ -185,20 +185,20 @@ class NodeSparseSelfAttention(MessagePassing):
                              device=x.device, dtype=x.dtype)
 
         for i in range(t):
-            out_i = self.propagate(edge_index, x=x[i], size=size)
+            q = self.q(x[i])  # [M, out_channels]
+            k = self.k(x[i])  # [M, out_channels]
+            v = self.v(x[i])  # [M, out_channels]
+
+            out_i = self.propagate(edge_index, q=q, k=k, v=v, size=size)
             output[i] = out_i
 
         return output
 
-    def message(self, x_i, x_j, index, ptr, size_i):
-        # x_i: target nodes (中心节点), x_j: source nodes (邻居)
-        Q = self.q_proj(x_i)  # [E, out]
-        K = self.k_proj(x_j)  # [E, out]
-        V = self.v_proj(x_j)  # [E, out]
-
-        attn_logits = (Q * K).sum(dim=-1) / self.scale  # [E]
-        attn_weights = softmax(attn_logits, index, num_nodes=size_i)  # [E]
-        return attn_weights.unsqueeze(-1) * V  # [E, out]
+    def message(self, q_i, k_j, v_j, index, ptr, size_i):
+        # q_i: target query, k_j/v_j: source key/value
+        attn_logits = (q_i * k_j).sum(dim=-1) * self.scale  # [E]
+        alpha = softmax(attn_logits, index, num_nodes=size_i)  # [E]
+        return alpha.unsqueeze(-1) * v_j  # [E, out_channels]
 
     def update(self, aggr_out, x):
         return aggr_out  # [N, out_channels]
@@ -208,9 +208,9 @@ class TriangleSparseSelfAttention(MessagePassing):
         super().__init__(aggr='add')
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.q_proj = nn.Linear(in_channels, out_channels)
-        self.k_proj = nn.Linear(in_channels, out_channels)
-        self.v_proj = nn.Linear(in_channels, out_channels)
+        self.q = nn.Linear(in_channels, out_channels)
+        self.k = nn.Linear(in_channels, out_channels)
+        self.v = nn.Linear(in_channels, out_channels)
         self.scale = out_channels ** 0.5
 
     def forward(self, x, edge_index, size=None):
@@ -226,19 +226,20 @@ class TriangleSparseSelfAttention(MessagePassing):
                              device=x.device, dtype=x.dtype)
 
         for i in range(t):
-            out_i = self.propagate(edge_index, x=x[i], size=size)
+            q = self.q(x[i])  # [M, out_channels]
+            k = self.k(x[i])  # [M, out_channels]
+            v = self.v(x[i])  # [M, out_channels]
+
+            out_i = self.propagate(edge_index, q=q, k=k, v=v, size=size)
             output[i] = out_i
 
         return output
 
-    def message(self, x_i, x_j, index, ptr, size_i):
-        Q = self.q_proj(x_i)
-        K = self.k_proj(x_j)
-        V = self.v_proj(x_j)
-
-        attn_logits = (Q * K).sum(dim=-1) / self.scale
-        attn_weights = softmax(attn_logits, index, num_nodes=size_i)
-        return attn_weights.unsqueeze(-1) * V
+    def message(self, q_i, k_j, v_j, index, ptr, size_i):
+        # q_i: target query, k_j/v_j: source key/value
+        attn_logits = (q_i * k_j).sum(dim=-1) * self.scale  # [E]
+        alpha = softmax(attn_logits, index, num_nodes=size_i)  # [E]
+        return alpha.unsqueeze(-1) * v_j  # [E, out_channels]
 
     def update(self, aggr_out, x):
         return aggr_out
@@ -249,7 +250,7 @@ class NodeToTriangleCrossAttention(MessagePassing):
         self.q = nn.Linear(tri_dim, hidden_dim)      # Query from triangle (target)
         self.k = nn.Linear(node_dim, hidden_dim)     # Key from node (source)
         self.v = nn.Linear(node_dim, hidden_dim)     # Value from node (source)
-        self.out = nn.Linear(hidden_dim, tri_dim)
+        self.out_proj = nn.Linear(hidden_dim, tri_dim)
         self.dropout = nn.Dropout(dropout)
         self.scale = hidden_dim ** -0.5
 
@@ -268,12 +269,18 @@ class NodeToTriangleCrossAttention(MessagePassing):
             attn_output = None
 
         for i in range(t):
-            res = self.propagate(
-                nt_edge_index,
-                x=(x_node[i], x_tri[i]),   # (source=node, target=triangle)
-                size=size,
-                return_attn=return_attn
-            )
+            q = self.q(x_tri[i])  # [M, out_channels]
+            k = self.k(x_node[i])  # [M, out_channels]
+            v = self.v(x_node[i])  # [M, out_channels]
+
+            res = self.propagate(nt_edge_index, q=q, k=k, v=v, size=size)
+
+            # res = self.propagate(
+            #     nt_edge_index,
+            #     x=(x_node[i], x_tri[i]),   # (source=node, target=triangle)
+            #     size=size,
+            #     return_attn=return_attn
+            # )
             
             if return_attn:
                 out, attn = res
@@ -283,30 +290,21 @@ class NodeToTriangleCrossAttention(MessagePassing):
                 output[i] = res
 
         if return_attn:
-            return output, attn_output
+            aggr, attn = res
+            out = self.out_proj(aggr) + x_tri
+            return out, attn
         else:
-            return output
-
-    def message(self, x_i, x_j, index, ptr, size_i, return_attn):
-        # x_i: source (node features) -> [E, node_dim]
-        # x_j: target (triangle features) -> [E, tri_dim]
-        q = self.q(x_j)      # triangle's query
-        k = self.k(x_i)      # node's key
-        v = self.v(x_i)      # node's value
-        alpha = (q * k).sum(dim=-1) * self.scale  # [E]
-        alpha = softmax(alpha, index, num_nodes=size_i)
-        alpha = self.dropout(alpha)
-        if return_attn:
-            self._alpha = alpha
-        return alpha.unsqueeze(-1) * v  # [E, hidden_dim]
-
-    def update(self, aggr_out, x, return_attn):
-        x_dst = x[1]  # original triangle features: [M, tri_dim]
-        out = self.out(aggr_out) + x_dst  # residual connection
-        if return_attn:
-            return out, self._alpha
-        else:
+            out = self.out_proj(res) + x_tri
             return out
+
+    def message(self, q_i, k_j, v_j, index, ptr, size_i):
+        # q_i: target query, k_j/v_j: source key/value
+        attn_logits = (q_i * k_j).sum(dim=-1) * self.scale  # [E]
+        alpha = softmax(attn_logits, index, num_nodes=size_i)  # [E]
+        return alpha.unsqueeze(-1) * v_j  # [E, out_channels]
+
+    def update(self, aggr_out, return_attn=False):
+        return aggr_out
 
 class TriangleToNodeCrossAttention(MessagePassing):
     def __init__(self, tri_dim, node_dim, hidden_dim, dropout=0.0):
@@ -314,7 +312,7 @@ class TriangleToNodeCrossAttention(MessagePassing):
         self.q = nn.Linear(node_dim, hidden_dim)
         self.k = nn.Linear(tri_dim, hidden_dim)
         self.v = nn.Linear(tri_dim, hidden_dim)
-        self.out = nn.Linear(hidden_dim, node_dim)
+        self.out_proj = nn.Linear(hidden_dim, node_dim)
         self.dropout = nn.Dropout(dropout)
         self.scale = hidden_dim ** -0.5
 
@@ -333,12 +331,17 @@ class TriangleToNodeCrossAttention(MessagePassing):
             attn_output = None
 
         for i in range(t):
-            res = self.propagate(
-                tn_edge_index,
-                x=(x_tri[i], x_node[i]),   # (source=tri, target=node)
-                size=size,
-                return_attn=return_attn
-            )
+            q = self.q(x_node[i])  # [M, out_channels]
+            k = self.k(x_tri[i])  # [M, out_channels]
+            v = self.v(x_tri[i])  # [M, out_channels]
+
+            res = self.propagate(tn_edge_index, q=q, k=k, v=v, size=size)
+            # res = self.propagate(
+            #     tn_edge_index,
+            #     x=(x_tri[i], x_node[i]),   # (source=tri, target=node)
+            #     size=size,
+            #     return_attn=return_attn
+            # )
             
             if return_attn:
                 out, attn = res
@@ -348,32 +351,22 @@ class TriangleToNodeCrossAttention(MessagePassing):
                 output[i] = res
 
         if return_attn:
-            return output, attn_output
+            aggr, attn = res
+            out = self.out_proj(aggr) + x_node
+            return out, attn
         else:
-            return output
-
-    def message(self, x_i, x_j, index, ptr, size_i, return_attn):
-        q = self.q(x_j)      # [E, hidden_dim], target (node)
-        k = self.k(x_i)      # [E, hidden_dim], source (tri)
-        v = self.v(x_i)      # [E, hidden_dim]
-
-        alpha = (q * k).sum(dim=-1) * self.scale  # [E]
-        alpha = softmax(alpha, index, num_nodes=size_i)  # [E]
-        alpha = self.dropout(alpha)
-
-        if return_attn:
-            self._alpha = alpha
-
-        return alpha.unsqueeze(-1) * v  # [E, hidden_dim]
-
-    def update(self, aggr_out, x, return_attn):
-        x_dst = x[1]  # [N, node_dim], original target node features
-        out = self.out(aggr_out) + x_dst  # residual connection
-        
-        if return_attn:
-            return out, self._alpha
-        else:
+            out = self.out_proj(res) + x_node
             return out
+
+
+    def message(self, q_i, k_j, v_j, index, ptr, size_i):
+        # q_i: target query, k_j/v_j: source key/value
+        attn_logits = (q_i * k_j).sum(dim=-1) * self.scale  # [E]
+        alpha = softmax(attn_logits, index, num_nodes=size_i)  # [E]
+        return alpha.unsqueeze(-1) * v_j  # [E, out_channels]
+
+    def update(self, aggr_out, return_attn=False):
+        return aggr_out
 
 class CrossAttentionTransformer(nn.Module):
     def __init__(self, embed_dim=256, nhead=1, dropout=0.1, mlp_ratio=4, node=60882, triangle=115443,):
@@ -492,22 +485,22 @@ class Encoder(nn.Module):
     def forward(self, node, triangle):
         node = node.squeeze(0)
         triangle = triangle.squeeze(0)
-        print('-1', node.shape, triangle.shape)
+        # print('-1', node.shape, triangle.shape)
         T_node, N_node, C_node = node.shape
         T_triangle, N_triangle, C_triangle = triangle.shape
         assert N_node == self.node, f"Expected {self.node} nodes, got {N_node}"
         assert N_triangle == self.triangle, f"Expected {self.triangle} triangles, got {N_triangle}"
         assert C_node == self.node_var, f"Expected {self.node_var} node features, got {C_node}"
         assert C_triangle == self.triangle_var, f"Expected {self.triangle_var} triangle features, got {C_triangle}"
-        print('0', node.shape, triangle.shape)
+        # print('0', node.shape, triangle.shape)
         node = self.node_embedding_layer(node)
         triangle = self.triangle_embedding_layer(triangle)
-        print('1', node.shape, triangle.shape)
+        # print('1', node.shape, triangle.shape)
         for layer in self.layers:
             node, triangle = layer(node, triangle)
-            print('2', node.shape, triangle.shape)
+            # print('2', node.shape, triangle.shape)
 
-        print('3', node.shape, triangle.shape)
+        # print('3', node.shape, triangle.shape)
         return node, triangle
 
 class MultiStepPredictionHead(nn.Module):
@@ -531,7 +524,7 @@ class MultiStepPredictionHead(nn.Module):
         assert t == self.t_in, f"Expected t={self.t_in}, got {t}"
         
         x = x.permute(1, 0, 2).reshape(n, -1)  # [N, t_in * C]
-        print('x', x.shape)
+        # print('x', x.shape)
         out = self.head(x)                    # [N, t_out * out_dim]
         out = out.reshape(n, self.t_out, self.out_dim).permute(1, 0, 2)  # [t_out, N, out_dim]
         return out
@@ -572,13 +565,13 @@ class Decoder(nn.Module):
         )
 
     def forward(self, node, triangle):
-        print('4', node.shape, triangle.shape)
+        # print('4', node.shape, triangle.shape)
         node_pred = self.node_pred_head(node)      # [t_out, N, node_var]
         triangle_pred = self.tri_pred_head(triangle)         # [t_out, M, triangle_var]
 
         # node_pred = self.node_head(node)
         # triangle_pred = self.triangle_head(triangle)
-        print('5', node.shape, triangle.shape)
+        # print('5', node.shape, triangle.shape)
         return node_pred, triangle_pred
 
 class ElementTransformerNet(nn.Module):
