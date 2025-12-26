@@ -186,6 +186,6 @@ if __name__ == "__main__":
     tri_data_dir="dataset/triangle/data/",
     num_epochs=100,
     checkpoint_name_out="checkpoints/" + timestamp_str+ "_best_model.pth",
-    total_timesteps=6,
+    total_timesteps=48,
     batch_size=1)
     

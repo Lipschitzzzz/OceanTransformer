@@ -8,11 +8,6 @@ import processing
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import softmax
 
-import os
-import numpy as np
-import torch
-from torch.utils.data import Dataset
-
 class FVCOMDataset(Dataset):
     def __init__(
         self,
@@ -173,38 +168,41 @@ class NodeSparseSelfAttention(MessagePassing):
         self.q = nn.Linear(in_channels, out_channels)
         self.k = nn.Linear(in_channels, out_channels)
         self.v = nn.Linear(in_channels, out_channels)
-        self.scale = out_channels ** 0.5
+        self.scale = out_channels ** -0.5  # 注意：通常是除以 sqrt(d)，所以是负指数！
 
     def forward(self, x, edge_index, size=None):
         """
         x: [t, N, in_channels]
-        edge_index: [2, E]
+        edge_index: [2, E]  (shared across all t time steps)
         returns: [t, N, out_channels]
         """
-        t, num_nodes, _ = x.shape
-        E = edge_index.size(1)
+        t, N, _ = x.shape
 
-        output = torch.empty(t, num_nodes, self.out_channels, 
-                             device=x.device, dtype=x.dtype)
+        x_flat = x.view(t * N, -1)
 
-        for i in range(t):
-            q = self.q(x[i])  # [M, out_channels]
-            k = self.k(x[i])  # [M, out_channels]
-            v = self.v(x[i])  # [M, out_channels]
+        row, col = edge_index  # each of shape [E]
+        offsets = torch.arange(t, device=x.device).view(-1, 1) * N  # [t, 1]
+        row_exp = (row.unsqueeze(0) + offsets).view(-1)            # [t * E]
+        col_exp = (col.unsqueeze(0) + offsets).view(-1)            # [t * E]
+        edge_index_exp = torch.stack([row_exp, col_exp], dim=0)    # [2, t*E]
 
-            out_i = self.propagate(edge_index, q=q, k=k, v=v, size=size)
-            output[i] = out_i
+        q = self.q(x_flat)  # [t*N, out_channels]
+        k = self.k(x_flat)  # [t*N, out_channels]
+        v = self.v(x_flat)  # [t*N, out_channels]
 
-        return output
+        out_flat = self.propagate(edge_index_exp, q=q, k=k, v=v, size=(t * N, t * N))
+
+        out = out_flat.view(t, N, -1)
+        return out
 
     def message(self, q_i, k_j, v_j, index, ptr, size_i):
-        # q_i: target query, k_j/v_j: source key/value
-        attn_logits = (q_i * k_j).sum(dim=-1) * self.scale  # [E]
-        alpha = softmax(attn_logits, index, num_nodes=size_i)  # [E]
-        return alpha.unsqueeze(-1) * v_j  # [E, out_channels]
+        # q_i, k_j: [num_edges, out_channels]
+        attn_logits = (q_i * k_j).sum(dim=-1) * self.scale  # [E_total]
+        alpha = softmax(attn_logits, index, num_nodes=size_i)  # [E_total]
+        return alpha.unsqueeze(-1) * v_j  # [E_total, out_channels]
 
-    def update(self, aggr_out, x):
-        return aggr_out  # [N, out_channels]
+    def update(self, aggr_out, x=None):
+        return aggr_out
 
 class TriangleSparseSelfAttention(MessagePassing):
     def __init__(self, in_channels, out_channels):
@@ -218,25 +216,33 @@ class TriangleSparseSelfAttention(MessagePassing):
 
     def forward(self, x, edge_index, size=None):
         """
-        x: [t, M, in_channels]
-        edge_index: [2, E_tri]
-        returns: [t, M, out_channels]
+        x: [t * M, in_channels]  <-- reshape to node-first
+        or keep [t, M, C] but use vmap / broadcasting carefully
+        But easier: treat as [N, C] where N = t * M, and adjust edge_index accordingly.
         """
-        t, num_tris, _ = x.shape
-        E = edge_index.size(1)
+        t, M, _ = x.shape
+        N = t * M
 
-        output = torch.empty(t, num_tris, self.out_channels,
-                             device=x.device, dtype=x.dtype)
+        # Reshape x to [N, C]
+        x_flat = x.view(N, -1)
 
-        for i in range(t):
-            q = self.q(x[i])  # [M, out_channels]
-            k = self.k(x[i])  # [M, out_channels]
-            v = self.v(x[i])  # [M, out_channels]
+        # Expand edge_index for each time step (assuming same graph per time step)
+        # edge_index: [2, E] -> [2, t * E]
+        row, col = edge_index
+        offsets = torch.arange(t, device=x.device).view(-1, 1) * M  # [t, 1]
+        row_exp = (row.unsqueeze(0) + offsets).view(-1)            # [t * E]
+        col_exp = (col.unsqueeze(0) + offsets).view(-1)            # [t * E]
+        edge_index_exp = torch.stack([row_exp, col_exp], dim=0)    # [2, t*E]
 
-            out_i = self.propagate(edge_index, q=q, k=k, v=v, size=size)
-            output[i] = out_i
+        # Compute Q, K, V on flat input
+        q = self.q(x_flat)  # [N, out_channels]
+        k = self.k(x_flat)  # [N, out_channels]
+        v = self.v(x_flat)  # [N, out_channels]
 
-        return output
+        # Propagate
+        out_flat = self.propagate(edge_index_exp, q=q, k=k, v=v, size=(N, N))
+        out = out_flat.view(t, M, -1)
+        return out
 
     def message(self, q_i, k_j, v_j, index, ptr, size_i):
         # q_i: target query, k_j/v_j: source key/value
@@ -258,124 +264,117 @@ class NodeToTriangleCrossAttention(MessagePassing):
         self.scale = hidden_dim ** -0.5
 
     def forward(self, x_tri, x_node, nt_edge_index, size=None, return_attn=False):
-        # x_tri: [t, M, tri_dim]
-        # x_node: [t, N, node_dim]
-        t, num_tris, tri_dim = x_tri.shape
-        _, num_nodes, node_dim = x_node.shape
-        E = nt_edge_index.size(1)
+        """
+        x_tri: [t, M, tri_dim]
+        x_node: [t, N, node_dim]
+        nt_edge_index: [2, E], source=node, target=triangle (static across t)
+        """
+        t, M, _ = x_tri.shape
+        _, N, _ = x_node.shape
 
-        output = torch.empty(t, num_tris, tri_dim, device=x_tri.device, dtype=x_tri.dtype)
-        
+        # Flatten: [t, M/N, C] -> [t*M/t*N, C]
+        x_tri_flat = x_tri.view(t * M, -1)   # [tM, tri_dim]
+        x_node_flat = x_node.view(t * N, -1) # [tN, node_dim]
+
+        # Expand edge_index: shift node and triangle indices by time step
+        src, dst = nt_edge_index  # src: node idx (0~N-1), dst: tri idx (0~M-1)
+        offsets_t = torch.arange(t, device=x_tri.device).view(-1, 1)  # [t, 1]
+
+        # Source (node): add i * N
+        src_exp = (src.unsqueeze(0) + offsets_t * N).view(-1)   # [t*E]
+        # Target (triangle): add i * M
+        dst_exp = (dst.unsqueeze(0) + offsets_t * M).view(-1)   # [t*E]
+
+        edge_index_exp = torch.stack([dst_exp, src_exp], dim=0)
+
+        edge_index_exp = torch.stack([src_exp, dst_exp], dim=0)  # [2, t*E], [source=node, target=tri]
+
+        # Compute Q/K/V
+        q = self.q(x_tri_flat)    # [tM, hidden]
+        k = self.k(x_node_flat)   # [tN, hidden]
+        v = self.v(x_node_flat)   # [tN, hidden]
+
+        # Propagate
+        aggr_out = self.propagate(edge_index_exp, q=q, k=k, v=v, size=size)
+
+        # Reshape and output projection
+        aggr_out = aggr_out.view(t, M, -1)  # [t, M, hidden]
+        out = self.out_proj(aggr_out) + x_tri  # residual
+
         if return_attn:
-            attn_output = torch.empty(t, E, device=x_tri.device, dtype=x_tri.dtype)
+            raise NotImplementedError("return_attn not supported in batched version yet.")
         else:
-            attn_output = None
-
-        for i in range(t):
-            q = self.q(x_tri[i])  # [M, out_channels]
-            k = self.k(x_node[i])  # [M, out_channels]
-            v = self.v(x_node[i])  # [M, out_channels]
-
-            res = self.propagate(nt_edge_index, q=q, k=k, v=v, size=size)
-
-            # res = self.propagate(
-            #     nt_edge_index,
-            #     x=(x_node[i], x_tri[i]),   # (source=node, target=triangle)
-            #     size=size,
-            #     return_attn=return_attn
-            # )
-            
-            if return_attn:
-                out, attn = res
-                output[i] = out
-                attn_output[i] = attn
-            else:
-                output[i] = res
-
-        if return_attn:
-            aggr, attn = res
-            out = self.out_proj(aggr) + x_tri
-            return out, attn
-        else:
-            out = self.out_proj(res) + x_tri
             return out
 
     def message(self, q_i, k_j, v_j, index, ptr, size_i):
-        # q_i: target query, k_j/v_j: source key/value
-        attn_logits = (q_i * k_j).sum(dim=-1) * self.scale  # [E]
-        alpha = softmax(attn_logits, index, num_nodes=size_i)  # [E]
-        return alpha.unsqueeze(-1) * v_j  # [E, out_channels]
+        attn_logits = (q_i * k_j).sum(dim=-1) * self.scale
+        alpha = softmax(attn_logits, index, num_nodes=size_i)
+        return alpha.unsqueeze(-1) * v_j
 
-    def update(self, aggr_out, return_attn=False):
+    def update(self, aggr_out):
         return aggr_out
 
 class TriangleToNodeCrossAttention(MessagePassing):
     def __init__(self, tri_dim, node_dim, hidden_dim, dropout=0.0):
         super().__init__(aggr='add')
-        self.q = nn.Linear(node_dim, hidden_dim)
-        self.k = nn.Linear(tri_dim, hidden_dim)
-        self.v = nn.Linear(tri_dim, hidden_dim)
+        self.q = nn.Linear(node_dim, hidden_dim)      # Query from node (target)
+        self.k = nn.Linear(tri_dim, hidden_dim)       # Key from triangle (source)
+        self.v = nn.Linear(tri_dim, hidden_dim)       # Value from triangle (source)
         self.out_proj = nn.Linear(hidden_dim, node_dim)
         self.dropout = nn.Dropout(dropout)
         self.scale = hidden_dim ** -0.5
 
     def forward(self, x_node, x_tri, tn_edge_index, size=None, return_attn=False):
-        # x_node: [t, N, node_dim]
-        # x_tri:  [t, M, tri_dim]
-        t, num_nodes, node_dim = x_node.shape
-        _, num_tris, tri_dim = x_tri.shape
-        E = tn_edge_index.size(1)
-
-        output = torch.empty(t, num_nodes, node_dim, device=x_node.device, dtype=x_node.dtype)
+        """
+        x_node: [t, N, node_dim]
+        x_tri:  [t, M, tri_dim]
+        tn_edge_index: [2, E], source=triangle, target=node (static across t)
+        """
         
+        t, N, _ = x_node.shape
+        _, M, _ = x_tri.shape
+
+        x_node_flat = x_node.view(t * N, -1)  # [tN, node_dim]
+        x_tri_flat = x_tri.view(t * M, -1)    # [tM, tri_dim]
+
+        src, dst = tn_edge_index  # src: tri idx (0~M-1), dst: node idx (0~N-1)
+        offsets_t = torch.arange(t, device=x_node.device).view(-1, 1)
+
+        # Source (triangle): + i * M
+        src_exp = (src.unsqueeze(0) + offsets_t * M).view(-1)   # [t*E]
+        # Target (node): + i * N
+        dst_exp = (dst.unsqueeze(0) + offsets_t * N).view(-1)   # [t*E]
+
+        # edge_index = [source=tri, target=node]
+        edge_index_exp = torch.stack([src_exp, dst_exp], dim=0)  # [2, t*E]
+
+        q = self.q(x_node_flat)   # [tN, hidden]
+        k = self.k(x_tri_flat)    # [tM, hidden]
+        v = self.v(x_tri_flat)    # [tM, hidden]
+
+        aggr_out = self.propagate(edge_index_exp, q=q, k=k, v=v, size=size)
+        aggr_out = aggr_out.view(t, N, -1)
+        out = self.out_proj(aggr_out) + x_node
+
         if return_attn:
-            attn_output = torch.empty(t, E, device=x_node.device, dtype=x_node.dtype)
+            raise NotImplementedError("return_attn not supported in batched version yet.")
         else:
-            attn_output = None
-
-        for i in range(t):
-            q = self.q(x_node[i])  # [M, out_channels]
-            k = self.k(x_tri[i])  # [M, out_channels]
-            v = self.v(x_tri[i])  # [M, out_channels]
-
-            res = self.propagate(tn_edge_index, q=q, k=k, v=v, size=size)
-            # res = self.propagate(
-            #     tn_edge_index,
-            #     x=(x_tri[i], x_node[i]),   # (source=tri, target=node)
-            #     size=size,
-            #     return_attn=return_attn
-            # )
-            
-            if return_attn:
-                out, attn = res
-                output[i] = out
-                attn_output[i] = attn
-            else:
-                output[i] = res
-
-        if return_attn:
-            aggr, attn = res
-            out = self.out_proj(aggr) + x_node
-            return out, attn
-        else:
-            out = self.out_proj(res) + x_node
             return out
 
-
     def message(self, q_i, k_j, v_j, index, ptr, size_i):
-        # q_i: target query, k_j/v_j: source key/value
-        attn_logits = (q_i * k_j).sum(dim=-1) * self.scale  # [E]
-        alpha = softmax(attn_logits, index, num_nodes=size_i)  # [E]
-        return alpha.unsqueeze(-1) * v_j  # [E, out_channels]
+        attn_logits = (q_i * k_j).sum(dim=-1) * self.scale
+        alpha = softmax(attn_logits, index, num_nodes=size_i)
+        return alpha.unsqueeze(-1) * v_j
 
-    def update(self, aggr_out, return_attn=False):
+    def update(self, aggr_out):
         return aggr_out
 
 class CrossAttentionTransformer(nn.Module):
-    def __init__(self, embed_dim=256, nhead=1, dropout=0.1, mlp_ratio=4, node=60882, triangle=115443,):
+    def __init__(self, embed_dim=256, nhead=1, dropout=0.1, mlp_ratio=4, t_in=1, node=60882, triangle=115443,):
         super().__init__()
         self.num_node_nodes = node
         self.num_tri_nodes = triangle
+        self.t_in = t_in
         node_edge_index, tri_edge_index, tn_edge_index, nt_edge_index = processing.generate_sparse_graph()
         self.register_buffer('node_edge_index', node_edge_index)
         self.register_buffer('tri_edge_index', tri_edge_index)
@@ -426,7 +425,7 @@ class CrossAttentionTransformer(nn.Module):
         self.x_node_new = self.tri2node(self.norm_node_cross(node),
                                         self.norm_triangle_self(triangle_original),
                                         self.tn_edge_index,
-                                        size=(self.num_tri_nodes, self.num_node_nodes),
+                                        size=(self.t_in * self.num_tri_nodes, self.t_in * self.num_node_nodes),
                                         return_attn=False)
         
         node = node + self.dropout(self.x_node_new)
@@ -440,7 +439,7 @@ class CrossAttentionTransformer(nn.Module):
         self.x_tri_new  = self.node2tri(self.norm_triangle_cross(triangle),
                                         self.norm_node_self(node_original),
                                         self.nt_edge_index,
-                                        size=(self.num_node_nodes, self.num_tri_nodes),
+                                        size=(self.t_in * self.num_node_nodes, self.t_in * self.num_tri_nodes),
                                         return_attn=False)
         triangle = triangle + self.dropout(self.x_tri_new)
         triangle = triangle + self.dropout(self.mlp_triangle(self.norm_triangle_mlp(triangle)))
