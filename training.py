@@ -79,8 +79,8 @@ def training(
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     model = elementtransformer.FVCOMModel(
-        node=60882, triangle=115443, node_var=13,
-        triangle_var=18, embed_dim=256,
+        node=60882, triangle=115443, node_var=5,
+        triangle_var=6, embed_dim=256,
         mlp_ratio=4., nhead=2, num_layers=2,
         t_in=t_in, t_out=t_out,
         neighbor_table=None, dropout=0.1

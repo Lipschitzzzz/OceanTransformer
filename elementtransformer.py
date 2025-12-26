@@ -75,12 +75,15 @@ class FVCOMDataset(Dataset):
         node_out = self._load_sequence(self.node_data_dir, self.node_files, target_start, self.t_out)
         tri_out = self._load_sequence(self.tri_data_dir, self.tri_files, target_start, self.t_out)
 
+        indices1 = [0, 5, 10, 11, 12]
+        indices2 = [0, 5, 10, 15, 16, 17]
+
         return (
-            torch.from_numpy(node_in).float(),
-            torch.from_numpy(tri_in).float()
+            torch.from_numpy(node_in[:, :, indices1]).float(),
+            torch.from_numpy(tri_in[:, :, indices2]).float()
         ), (
-            torch.from_numpy(node_out).float(),
-            torch.from_numpy(tri_out).float()
+            torch.from_numpy(node_out[:, :, indices1]).float(),
+            torch.from_numpy(tri_out[:, :, indices2]).float()
         )
 
 class SinusoidalPositionalEncoding(nn.Module):
