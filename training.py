@@ -14,14 +14,14 @@ def training_test():
     N_tri = 115443
     node_in_dim = 13
     triangle_in_dim = 18
-    embed_dim=256
+    embed_dim = 256
 
-    node_feat = torch.randn(1, N_node, node_in_dim).to(device)
-    triangle_feat = torch.randn(1, N_tri, triangle_in_dim).to(device)
+    node_feat = torch.randn(6, N_node, node_in_dim).to(device)
+    triangle_feat = torch.randn(6, N_tri, triangle_in_dim).to(device)
 
     print(f"Input shapes:")
-    print(f"  node_feat: {node_feat.shape}")
-    print(f"  triangle_feat: {triangle_feat.shape}\n")
+    print(f"node_feat: {node_feat.shape}")
+    print(f"triangle_feat: {triangle_feat.shape}\n")
 
     model = elementtransformer.FVCOMModel(
         node=N_node, triangle=N_tri, node_var=node_in_dim,
@@ -31,7 +31,8 @@ def training_test():
     ).to(device)
 
     with torch.no_grad():
-        node_pred, triangle_pred = model.predict(node_feat, triangle_feat, 'checkpoints/2025_12_12_11_24_2A100.pth')
+        # node_pred, triangle_pred = model.predict(node_feat, triangle_feat, 'checkpoints/2025_12_29_18_47_4A40.pth')
+        node_pred, triangle_pred = model(node_feat, triangle_feat)
     print(node_pred.shape)
     print(triangle_pred.shape)
 
@@ -42,8 +43,9 @@ def training(
     tri_data_dir,
     num_epochs,
     checkpoint_name_out,
-    total_timesteps=144 * 7,
+    total_timesteps=144 * 2,
     steps_per_file=144,
+    input_steps=6,
     pred_step=1,
     batch_size=1,
     early_stop_patience=25
@@ -59,9 +61,11 @@ def training(
         tri_data_dir=tri_data_dir,
         total_timesteps=total_timesteps,
         steps_per_file=steps_per_file,
+        input_steps=6,
         pred_step=pred_step
     )
-
+    x_node, x_tri = full_dataset[142][0]   # t=142~147 (crosses file0→file1)
+    print(x_node.shape)
     total_samples = len(full_dataset)
     train_size = int(0.8 * total_samples)
     val_size = total_samples - train_size
@@ -177,12 +181,15 @@ if __name__ == "__main__":
     timestamp_str = time.strftime("%Y_%m_%d_%H_%M", time.localtime(start_time))
     # training_test()
 
+    
+
     training(
-    node_data_dir="dataset/node/data/",
-    tri_data_dir="dataset/triangle/data/",
-    num_epochs=100,
-    checkpoint_name_out="checkpoints/" + timestamp_str+ "_best_model.pth",
-    total_timesteps=144,
-    pred_step=1,
-    batch_size=1)
+        node_data_dir="dataset/node/data/",
+        tri_data_dir="dataset/triangle/data/",
+        num_epochs=100,
+        checkpoint_name_out="checkpoints/" + timestamp_str+ "_best_model.pth",
+        total_timesteps=144*2,
+        input_steps=6,
+        pred_step=1,
+        batch_size=1)
     

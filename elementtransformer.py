@@ -8,6 +8,7 @@ import processing
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import softmax
 
+
 class FVCOMDataset(Dataset):
     def __init__(
         self,
@@ -15,11 +16,13 @@ class FVCOMDataset(Dataset):
         tri_data_dir: str,
         total_timesteps: int = 144 * 7,
         steps_per_file: int = 144,
+        input_steps: int = 6,
         pred_step: int = 1
     ):
         self.node_data_dir = node_data_dir
         self.tri_data_dir = tri_data_dir
         self.steps_per_file = steps_per_file
+        self.input_steps = input_steps
         self.pred_step = pred_step
 
         self.node_files = sorted([f for f in os.listdir(node_data_dir) if f.endswith('.npy')])
@@ -27,39 +30,71 @@ class FVCOMDataset(Dataset):
 
         assert len(self.node_files) == len(self.tri_files), "Number of node and triangle files must match!"
         
+        expected_total = len(self.node_files) * steps_per_file
+        if total_timesteps != expected_total:
+            raise ValueError(
+                f"total_timesteps={total_timesteps} does not match "
+                f"len(files)*steps_per_file = {expected_total}"
+            )
+
         self.total_timesteps = total_timesteps
-        self.max_start_t = total_timesteps - pred_step - 1
+        self.max_start_t = total_timesteps - input_steps - pred_step
         if self.max_start_t < 0:
-            raise ValueError(f"pred_step={pred_step} too large for total_timesteps={total_timesteps}")
+            raise ValueError(
+                f"input_steps ({input_steps}) + pred_step ({pred_step}) > total_timesteps ({total_timesteps})"
+            )
         self.total_samples = self.max_start_t + 1
 
     def _global_to_local(self, global_t: int):
+        """Map global timestep to (file_index, local_timestep)."""
         file_idx = global_t // self.steps_per_file
         local_t = global_t % self.steps_per_file
         return file_idx, local_t
 
     def _load_sequence(self, data_dir: str, files: list, global_t: int, length: int):
-        file_idx, local_t = self._global_to_local(global_t)
-        if local_t + length > self.steps_per_file:
-            raise RuntimeError(
-                f"Sample crosses file boundary at t={global_t}. "
-                "Either reduce pred_step or implement cross-file loading."
-            )
-        path = os.path.join(data_dir, files[file_idx])
-        data = np.load(path)
-        seq = data[local_t : local_t + length]
-        return seq
+        """
+        Load a continuous sequence of `length` timesteps starting at `global_t`,
+        even if it spans multiple files.
+        Returns: np.ndarray of shape [length, tokens, channels]
+        """
+        if global_t + length > self.total_timesteps:
+            raise IndexError(f"Requested sequence [{global_t}, {global_t + length}) exceeds total_timesteps={self.total_timesteps}")
+
+        chunks = []
+        remaining = length
+        current_t = global_t
+
+        while remaining > 0:
+            file_idx, local_t = self._global_to_local(current_t)
+            if file_idx >= len(files):
+                raise RuntimeError(f"File index {file_idx} out of range. Check total_timesteps.")
+
+            available_in_file = self.steps_per_file - local_t
+            take_steps = min(remaining, available_in_file)
+
+            path = os.path.join(data_dir, files[file_idx])
+            data = np.load(path)
+            chunk = data[local_t : local_t + take_steps]
+            chunks.append(chunk)
+
+            remaining -= take_steps
+            current_t += take_steps
+
+        return np.concatenate(chunks, axis=0)
 
     def __len__(self):
         return self.total_samples
 
     def __getitem__(self, idx: int):
-        t_input = idx
-        t_target = idx + self.pred_step
+        t_start = idx
+        t_end_input = t_start + self.input_steps
+        t_target = t_end_input + self.pred_step - 1
 
-        node_input = self._load_sequence(self.node_data_dir, self.node_files, t_input, self.pred_step).squeeze(0)
-        tri_input = self._load_sequence(self.tri_data_dir, self.tri_files, t_input, self.pred_step).squeeze(0)
+        # Load input sequence (e.g., 6 steps)
+        node_input = self._load_sequence(self.node_data_dir, self.node_files, t_start, self.input_steps)
+        tri_input = self._load_sequence(self.tri_data_dir, self.tri_files, t_start, self.input_steps)
 
+        # Load single-step target
         node_target = self._load_sequence(self.node_data_dir, self.node_files, t_target, 1).squeeze(0)
         tri_target = self._load_sequence(self.tri_data_dir, self.tri_files, t_target, 1).squeeze(0)
 
@@ -342,15 +377,16 @@ class CrossAttentionTransformer(nn.Module):
 
 class Encoder(nn.Module):
     def __init__(self, node=60882, triangle=115443, node_var=11,
-                 triangle_var=18, embed_dim=256,
+                 triangle_var=18, embed_dim=256, t_in=6,
                  mlp_ratio=4., nhead=2, num_layers=2,
                  neighbor_table=None, dropout=0.1):
         super().__init__()
         self.node = node
         self.triangle = triangle
         self.embed_dim = embed_dim
-        self.node_var = node_var
-        self.triangle_var = triangle_var
+        self.t_in = t_in
+        self.node_var = node_var * t_in
+        self.triangle_var = triangle_var * t_in
         self.mlp_ratio = mlp_ratio
         self.nhead = nhead
         self.num_layers = num_layers
@@ -380,7 +416,12 @@ class Encoder(nn.Module):
 
     def forward(self, node, triangle):
         node = node.squeeze(0)
+        node = node.reshape(1, node.shape[1], node.shape[0] * node.shape[2])
+        node = node.squeeze(0)
         triangle = triangle.squeeze(0)
+        triangle = triangle.reshape(1, triangle.shape[1], triangle.shape[0] * triangle.shape[2])
+        triangle = triangle.squeeze(0)
+        print(node.shape, triangle.shape)
         N_node, C_node = node.shape
         N_triangle, C_triangle = triangle.shape
         assert N_node == self.node, f"Expected {self.node} nodes, got {N_node}"
