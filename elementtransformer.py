@@ -421,7 +421,6 @@ class Encoder(nn.Module):
         triangle = triangle.squeeze(0)
         triangle = triangle.reshape(1, triangle.shape[1], triangle.shape[0] * triangle.shape[2])
         triangle = triangle.squeeze(0)
-        print(node.shape, triangle.shape)
         N_node, C_node = node.shape
         N_triangle, C_triangle = triangle.shape
         assert N_node == self.node, f"Expected {self.node} nodes, got {N_node}"

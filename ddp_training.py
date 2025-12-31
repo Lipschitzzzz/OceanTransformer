@@ -188,6 +188,7 @@ def train_zero_epoch_ddp(node_data_dir,
     checkpoint_name_out,
     total_timesteps=144 * 7,
     steps_per_file=144,
+    input_steps=6,
     pred_step=1,
     early_stop_patience=25
 ):
@@ -195,7 +196,11 @@ def train_zero_epoch_ddp(node_data_dir,
     best_loss = float('inf')
     early_stop_cnt = 0
     train_loss_dataset = []
+    train_loss_dataset1 = []
+    train_loss_dataset2 = []
     val_loss_dataset = []
+    val_loss_dataset1 = []
+    val_loss_dataset2 = []
     lr_history = []
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
@@ -215,6 +220,7 @@ def train_zero_epoch_ddp(node_data_dir,
         tri_data_dir=tri_data_dir,
         total_timesteps=total_timesteps,
         steps_per_file=steps_per_file,
+        input_steps=6,
         pred_step=pred_step
     )
 
@@ -248,12 +254,21 @@ def train_zero_epoch_ddp(node_data_dir,
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
+
     criterion = elementtransformer.WeightedMAEMSELoss().to(device)
+
+    huber = torch.nn.HuberLoss(delta=0.1, reduction='mean').to(device)
+    mae = torch.nn.L1Loss(reduction='mean').to(device)
+
+    W_tri = 1.0
+    W_node = 0.3
 
     for epoch in range(num_epochs):
         train_sampler.set_epoch(epoch)
         model.train()
         train_loss_sum = torch.tensor(0.0, device=device)
+        train_loss_node = torch.tensor(0.0, device=device)
+        train_loss_tri = torch.tensor(0.0, device=device)
         train_count = torch.tensor(0.0, device=device)
         iter = 0
         for (node_x, tri_x), (node_y, tri_y) in train_loader:
@@ -269,10 +284,12 @@ def train_zero_epoch_ddp(node_data_dir,
                 print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "pred node:       ", node_pred.shape)
                 print("GPU:", str(local_rank), "Training:", train_size, iter, "epoch:", epoch+1, '-', iter, "pred triangle:   ", tri_pred.shape)
 
-            loss_node = criterion(node_pred, node_y)
-            loss_tri = criterion(tri_pred, tri_y)
-            loss = loss_node + loss_tri
+            loss_node = mae(node_pred, node_y)
+            loss_tri = huber(tri_pred, tri_y)
+            loss = W_node * loss_node + W_tri * loss_tri
             train_loss_sum += loss.detach()
+            train_loss_node += loss_node.detach()
+            train_loss_tri += loss_tri.detach()
             train_count += 1
             iter += 1
 
@@ -282,14 +299,20 @@ def train_zero_epoch_ddp(node_data_dir,
             scheduler.step()
 
         dist.all_reduce(train_loss_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(train_loss_node, op=dist.ReduceOp.SUM)
+        dist.all_reduce(train_loss_tri, op=dist.ReduceOp.SUM)
         dist.all_reduce(train_count, op=dist.ReduceOp.SUM)
 
         train_loss = (train_loss_sum / train_count).item()
+        train_loss_1 = (train_loss_node / train_count).item()
+        train_loss_2 = (train_loss_tri / train_count).item()
 
 
 
         model.eval()
         val_loss_sum = torch.tensor(0.0, device=device)
+        val_loss_node = torch.tensor(0.0, device=device)
+        val_loss_tri = torch.tensor(0.0, device=device)
         val_count = torch.tensor(0.0, device=device)
         iter = 0
         with torch.no_grad():
@@ -299,9 +322,12 @@ def train_zero_epoch_ddp(node_data_dir,
 
                 node_pred, tri_pred = model(node_x, tri_x)
                 
-                loss_node = criterion(node_pred, node_y)
-                loss_tri = criterion(tri_pred, tri_y)
-                loss = loss_node + loss_tri
+                # loss_node = criterion(node_pred, node_y)
+                # loss_tri = criterion(tri_pred, tri_y)
+                # loss = loss_node + loss_tri
+                loss_node = mae(node_pred, node_y)
+                loss_tri = huber(tri_pred, tri_y)
+                loss = W_node * loss_node + W_tri * loss_tri
                 if local_rank == 0 and iter % 20 == 0:
                     print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "input node:      ", node_x.shape)
                     print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "input triangle:  ", tri_x.shape)
@@ -311,21 +337,38 @@ def train_zero_epoch_ddp(node_data_dir,
                     print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "pred triangle:   ", tri_pred.shape)
 
                 val_loss_sum += loss.detach()
+                val_loss_node += loss_node.detach()
+                val_loss_tri += loss_tri.detach()
+
                 val_count += 1
                 iter += 1
 
         dist.all_reduce(val_loss_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_loss_node, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_loss_tri, op=dist.ReduceOp.SUM)
         dist.all_reduce(val_count, op=dist.ReduceOp.SUM)
         val_loss = (val_loss_sum / val_count).item()
+        val_loss_1 = (val_loss_node / val_count).item()
+        val_loss_2 = (val_loss_tri / val_count).item()
 
         if local_rank == 0:
             print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}, Best: {best_loss:.6f}")
+            print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss Node: {train_loss_1:.6f}, Train Loss Triangle: {train_loss_2:.6f}")
+            print(f"Epoch [{epoch+1}/{num_epochs}], Val Loss Node: {val_loss_1:.6f}, Val Loss Triangle: {val_loss_2:.6f}")
             train_loss_dataset.append(train_loss)
+            train_loss_dataset1.append(train_loss_1)
+            train_loss_dataset2.append(train_loss_2)
             val_loss_dataset.append(val_loss)
+            val_loss_dataset1.append(val_loss_1)
+            val_loss_dataset2.append(val_loss_2)
             lr_history.append(optimizer.param_groups[0]['lr'])
             
             np.save('train_loss.npy', train_loss_dataset)
+            np.save('train_loss1.npy', train_loss_dataset1)
+            np.save('train_loss2.npy', train_loss_dataset2)
             np.save('val_loss.npy', val_loss_dataset)
+            np.save('val_loss1.npy', val_loss_dataset1)
+            np.save('val_loss2.npy', val_loss_dataset2)
             np.save("lr.npy", lr_history)
 
             if val_loss < best_loss:
@@ -339,14 +382,20 @@ def train_zero_epoch_ddp(node_data_dir,
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'train_loss': train_loss,
+                    'train_loss1': train_loss_1,
+                    'train_loss2': train_loss_2,
                     'val_loss': val_loss,
+                    'val_loss1': val_loss_1,
+                    'val_loss2': val_loss_2,
                 }, checkpoint_name_out)
 
                 print(f"Model saved at epoch {epoch+1} with val_loss: {val_loss:.6f}")
             else:
                 early_stop_cnt += 1
                 print(f"No improvement. Current val_loss: {val_loss:.6f}, Best so far: {best_loss:.6f}, Best epoch {best_epoch}")
-
+                print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss Node: {train_loss_1:.6f}, Train Loss Triangle: {train_loss_2:.6f}")
+                print(f"Epoch [{epoch+1}/{num_epochs}], Val Loss Node: {val_loss_1:.6f}, Val Loss Triangle: {val_loss_2:.6f}")
+            
         stop_flag = torch.tensor(0, device=device)
         if local_rank == 0 and early_stop_cnt > early_stop_patience:
             print("Early stopped.")
@@ -370,21 +419,21 @@ def main():
     assert world_size > 0, "No GPUs available"
     start_time = time.time()
     timestamp_str = time.strftime("%Y_%m_%d_%H_%M", time.localtime(start_time))
-    # train_zero_epoch_ddp(node_data_dir="dataset/node/data/",
-    # tri_data_dir="dataset/triangle/data/",
-    # num_epochs=100,
-    # checkpoint_name_out="checkpoints/" + timestamp_str+ "_2A100.pth",
-    # total_timesteps=144,
-    # pred_step=1,
-    # batch_size=1)
-    train_from_pth_ddp(node_data_dir="dataset/node/data/",
-                       tri_data_dir="dataset/triangle/data/",
-                       num_epochs=100,
-                       checkpoint_name_out="checkpoints/" + timestamp_str+ "_2A100.pth",
-                       checkpoint_path='checkpoints/2025_12_11_13_59_2A100.pth',
-                       total_timesteps=24*(30+31+30+31),
-                       steps_per_file=24,
-                       pred_step= 1,
-                       )
+    train_zero_epoch_ddp(node_data_dir="dataset/node/data/",
+    tri_data_dir="dataset/triangle/data/",
+    num_epochs=100,
+    checkpoint_name_out="checkpoints/" + timestamp_str+ "_2A100.pth",
+    total_timesteps=144,
+    input_steps=6,
+    pred_step=1)
+    # train_from_pth_ddp(node_data_dir="dataset/node/data/",
+    #                    tri_data_dir="dataset/triangle/data/",
+    #                    num_epochs=100,
+    #                    checkpoint_name_out="checkpoints/" + timestamp_str+ "_2A100.pth",
+    #                    checkpoint_path='checkpoints/2025_12_11_13_59_2A100.pth',
+    #                    total_timesteps=24*(30+31+30+31),
+    #                    steps_per_file=24,
+    #                    pred_step= 1,
+    #                    )
 if __name__ == "__main__":
     main()
