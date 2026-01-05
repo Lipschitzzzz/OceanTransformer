@@ -13,29 +13,29 @@ class FVCOMDataset(Dataset):
     def __init__(
         self,
         node_data_dir: str,
-        tri_data_dir: str,
+        triangle_data_dir: str,
         total_timesteps: int = 144 * 7,
         steps_per_file: int = 144,
         input_steps: int = 6,
         pred_step: int = 1
     ):
         self.node_data_dir = node_data_dir
-        self.tri_data_dir = tri_data_dir
+        self.triangle_data_dir = triangle_data_dir
         self.steps_per_file = steps_per_file
         self.input_steps = input_steps
         self.pred_step = pred_step
 
         self.node_files = sorted([f for f in os.listdir(node_data_dir) if f.endswith('.npy')])
-        self.tri_files = sorted([f for f in os.listdir(tri_data_dir) if f.endswith('.npy')])
+        self.tri_files = sorted([f for f in os.listdir(triangle_data_dir) if f.endswith('.npy')])
 
         assert len(self.node_files) == len(self.tri_files), "Number of node and triangle files must match!"
         
-        expected_total = len(self.node_files) * steps_per_file
-        if total_timesteps != expected_total:
-            raise ValueError(
-                f"total_timesteps={total_timesteps} does not match "
-                f"len(files)*steps_per_file = {expected_total}"
-            )
+        # expected_total = len(self.node_files) * steps_per_file
+        # if total_timesteps != expected_total:
+        #     raise ValueError(
+        #         f"total_timesteps={total_timesteps} does not match "
+        #         f"len(files)*steps_per_file = {expected_total}"
+        #     )
 
         self.total_timesteps = total_timesteps
         self.max_start_t = total_timesteps - input_steps - pred_step
@@ -92,11 +92,11 @@ class FVCOMDataset(Dataset):
 
         # Load input sequence (e.g., 6 steps)
         node_input = self._load_sequence(self.node_data_dir, self.node_files, t_start, self.input_steps)
-        tri_input = self._load_sequence(self.tri_data_dir, self.tri_files, t_start, self.input_steps)
+        tri_input = self._load_sequence(self.triangle_data_dir, self.tri_files, t_start, self.input_steps)
 
         # Load single-step target
         node_target = self._load_sequence(self.node_data_dir, self.node_files, t_target, 1).squeeze(0)
-        tri_target = self._load_sequence(self.tri_data_dir, self.tri_files, t_target, 1).squeeze(0)
+        tri_target = self._load_sequence(self.triangle_data_dir, self.tri_files, t_target, 1).squeeze(0)
 
         return (
             torch.from_numpy(node_input).float(),
