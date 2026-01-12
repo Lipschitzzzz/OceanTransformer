@@ -179,17 +179,17 @@ def training(
 if __name__ == "__main__":
     start_time = time.time()
     timestamp_str = time.strftime("%Y_%m_%d_%H_%M", time.localtime(start_time))
-    # training_test()
+    training_test()
 
     
 
-    training(
-        node_data_dir="dataset/node/data/",
-        tri_data_dir="dataset/triangle/data/",
-        num_epochs=100,
-        checkpoint_name_out="checkpoints/" + timestamp_str+ "_best_model.pth",
-        total_timesteps=144*2,
-        input_steps=6,
-        pred_step=1,
-        batch_size=1)
+    # training(
+    #     node_data_dir="dataset/node/data/",
+    #     tri_data_dir="dataset/triangle/data/",
+    #     num_epochs=100,
+    #     checkpoint_name_out="checkpoints/" + timestamp_str+ "_best_model.pth",
+    #     total_timesteps=144*2,
+    #     input_steps=6,
+    #     pred_step=1,
+    #     batch_size=1)
     

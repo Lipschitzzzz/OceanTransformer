@@ -68,7 +68,7 @@ def img_comparison(path, title, fvcomtitle, aititle, unit, output, target, min_v
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 6))
 
     sc1 = ax1.tripcolor(lon, lat, triangles, target, vmin=min_value, vmax=max_value,
-                        shading='flat', cmap=cmocean.cm.speed)
+                        shading='flat', cmap=cmocean.cm.thermal)
     margin_lon = delta_lon * 0.02
     margin_lat = delta_lat * 0.02
     ax1.set_xlim(lon_min - margin_lon, lon_max + margin_lon)
@@ -79,7 +79,7 @@ def img_comparison(path, title, fvcomtitle, aititle, unit, output, target, min_v
     fig.colorbar(sc1, ax=ax1, shrink=0.8, label=unit)
 
     sc2 = ax2.tripcolor(lon, lat, triangles, output, vmin=min_value, vmax=max_value,
-                        shading='flat', cmap=cmocean.cm.speed)
+                        shading='flat', cmap=cmocean.cm.thermal)
     ax2.set_xlim(lon_min - margin_lon, lon_max + margin_lon)
     ax2.set_ylim(lat_min - margin_lat, lat_max + margin_lat)
     ax2.set_xlabel('Longitude (°E)', fontsize=12)
@@ -104,9 +104,9 @@ def img_comparison(path, title, fvcomtitle, aititle, unit, output, target, min_v
     plt.close()
 
 def int_to_time_str_144(i: int) -> str:
-    if not (0 <= i <= 143):
+    if not (0 <= i <= 142):
         raise ValueError("Input i must be between 0 and 142")
-    total_minutes = i * 10 + 10
+    total_minutes = i * 10 + 60
     hours = total_minutes // 60
     minutes = total_minutes % 60
     return f"{hours:02d}:{minutes:02d}"
@@ -130,15 +130,51 @@ def int_to_time_str_167(i: int) -> str:
     
     return target.strftime("%Y.%m.%d %H:%M")
 
-def predict_n_step(n, model, checkpoint_name, node_data, triangle_data,
+def predict_mul_n_step(predict_steps, predict_length, model, checkpoint_name, criterion_node,
+                       criterion_triangle, node_data, triangle_data, node_json_list, triangle_json_list,
+                       output_node_npy, output_triangle_npy, device):
+    checkpoint_name=checkpoint_name
+    output_node_data = []
+    output_triangle_data = []
+    temp_node_data = torch.tensor(node_data[0,:,:]).to(device)
+    temp_triangle_data = torch.tensor(triangle_data[0,:,:]).to(device)
+    loss_list = []
+    for step in range(0, predict_steps):
+        input_node_data = temp_node_data
+        target_node_data = torch.from_numpy(node_data[step+predict_length,:,:]).to(device)
+        input_triangle_data = temp_triangle_data
+        target_triangle_data = torch.from_numpy(triangle_data[step+predict_length,:,:]).to(device)
+        print(input_node_data.shape)
+        print(target_node_data.shape)
+        print(input_triangle_data.shape)
+        print(target_triangle_data.shape)
+        output = model.predict(input_node_data, input_triangle_data, checkpoint_name=checkpoint_name)
+        loss = criterion(output[0], target_node_data)+ criterion(output[1], target_triangle_data)
+        print('step: ' + str(step) + ' loss: ', loss)
+
+        temp_node_data = output[0]
+        temp_triangle_data = output[1]
+        
+        output_node_data.append(output[0].squeeze(0).cpu().numpy())
+        output_triangle_data.append(output[1].squeeze(0).cpu().numpy())
+        loss_list.append(loss.cpu().numpy())
+    
+    output_node_data = processing.denormalization(np.array(output_node_data), 0, node_json)
+    output_triangle_data = processing.denormalization(np.array(output_triangle_data), 1, triangle_json)
+    np.save(output_node_npy, output_node_data)
+    np.save(output_triangle_npy, output_triangle_data)
+    np.save('loss_list.npy', loss_list)
+    return output_node_data, output_triangle_data
+
+def predict_single_n_step(n, model, checkpoint_name, node_data, triangle_data,
                     node_json, triangle_json, output_node_npy, output_triangle_npy, device):
     checkpoint_name=checkpoint_name
     criterion = elementtransformer.WeightedMAEMSELoss().cuda()
     output_node_data = []
     output_triangle_data = []
-    daily_length = n
     predict_length = 1
-    for i in range(0, daily_length - predict_length):
+    loss_list = []
+    for i in range(0, n):
         step = i
         input_node_data = torch.tensor(node_data[step,:,:]).to(device)
         target_node_data = torch.from_numpy(node_data[step+predict_length,:,:]).to(device)
@@ -159,9 +195,11 @@ def predict_n_step(n, model, checkpoint_name, node_data, triangle_data,
     output_triangle_data = processing.denormalization(np.array(output_triangle_data), 1, triangle_json)
     np.save(output_node_npy, output_node_data)
     np.save(output_triangle_npy, output_triangle_data)
+    # np.save('loss_list.npy', loss_list)
     return output_node_data, output_triangle_data
 
 def img_output(node_target, triangle_target, node_pred, triangle_pred):
+    assert len(node_target) == len(triangle_target) == len(node_pred) == len(triangle_pred), "pred and target shape must match!"
 
     node_name = ['Temperature0', 'Temperature1', 'Temperature2', 'Temperature3', 'Temperature4',
                  'Salinity0', 'Salinity1', 'Salinity2', 'Salinity3', 'Salinity4',
@@ -177,12 +215,29 @@ def img_output(node_target, triangle_target, node_pred, triangle_pred):
                      'meters s-1', 'meters s-1', 'meters s-1', 'meters s-1', 'meters s-1',
                      'm^2 s^-2', 'm^2 s^-2', 'm^2 s^-2', 'm^2 s^-2', 'm^2 s^-2',
                      'meters s-1', 'meters s-1', 'meters s-1']
-
-    # node_pred = processing.denormalization(node_pred, 0, node_json_file)
-    # node_target_data = processing.denormalization(node_target, 0, node_json_file)
-    # triangle_target_data = processing.denormalization(triangle_target, 1, triangle_json_file)
-    # triangle_pred = processing.denormalization(triangle_pred, 1, triangle_json_file)
     print(triangle_pred.shape, node_pred.shape, triangle_target.shape, node_target.shape)
+    # for n in range(0, len(node_name)):
+    #     output = node_pred[:, :, n],
+    #     target = node_target[:, :, n]
+    #     min_value = min(np.percentile(target, 2.5), np.percentile(output, 2.5))
+    #     max_value = max(np.percentile(target, 97.5), np.percentile(output, 97.5))
+    #     diff = output - target
+    #     diff_min = np.percentile(diff, 2.5)
+    #     diff_max = np.percentile(diff, 97.5)
+    #     print(min_value, max_value, diff_min, (diff_max+diff_min)/2, diff_max)
+    #     fvcomtitle = node_name[n]
+    #     aititle = node_name[n]
+    #     unit = node_unit[n]
+    #     for i in range(0, len(node_target)):
+    #         img_comparison('result/20240816-single/' + fvcomtitle, str(i).zfill(3),
+    #                        'FVCOM ' + fvcomtitle + ' 20240816 ' + int_to_time_str_144(i),
+    #                        'AI ' + aititle + ' 20240816 ' + int_to_time_str_144(i), unit,
+    #                        node_pred[i, :, n],
+    #                        node_target[i, :, n],
+    #                        min_value=min_value, max_value=max_value, diff_min=diff_min, diff_max=diff_max)
+    #     fvcomtitle = triangle_name[n]
+    #     aititle = triangle_name[n]
+    #     unit = triangle_unit[n]
     for n in range(0, len(triangle_name)):
         output = triangle_pred[:, :, n],
         target = triangle_target[:, :, n]
@@ -196,10 +251,10 @@ def img_output(node_target, triangle_target, node_pred, triangle_pred):
         fvcomtitle = triangle_name[n]
         aititle = triangle_name[n]
         unit = triangle_unit[n]
-        for i in range(0, 167):
-            img_comparison('result/2025-7days/' + fvcomtitle, str(i).zfill(3),
-                           'FVCOM ' + fvcomtitle + ' ' + int_to_time_str_167(i),
-                           'AI ' + aititle + ' ' + int_to_time_str_167(i), unit,
+        for i in range(0, len(triangle_target)):
+            img_comparison('result/20240816-single/' + fvcomtitle, str(i).zfill(3),
+                           'FVCOM ' + fvcomtitle + ' 20240816 ' + int_to_time_str_144(i),
+                           'AI ' + aititle + ' 20240816 ' + int_to_time_str_144(i), unit,
                            triangle_pred[i, :, n],
                            triangle_target[i, :, n],
                            min_value=min_value, max_value=max_value, diff_min=diff_min, diff_max=diff_max)
@@ -258,71 +313,64 @@ def point_difference(type, variable, position, ai, fvcom):
     plt.show()
 
 if __name__ == "__main__":
-    # device='cuda' if torch.cuda.is_available() else 'cpu'
-    # model = elementtransformer.FVCOMModel(
-    #     node=60882, triangle=115443, node_var=13,
-    #     triangle_var=18, embed_dim=256,
-    #     mlp_ratio=4., nhead=2, num_layers=2,
-    #     neighbor_table=None, dropout=0.1
-    # ).to(device)
+    device='cuda' if torch.cuda.is_available() else 'cpu'
+    model = elementtransformer.FVCOMModel(
+        node=60882, triangle=115443, node_var=13,
+        triangle_var=18, embed_dim=256,
+        mlp_ratio=4., nhead=2, num_layers=2,
+        neighbor_table=None, dropout=0.1
+    ).to(device)
     # criterion = elementtransformer.WeightedMAEMSELoss().to(device)
     # node_data_dir="dataset/node/data/"
     # tri_data_dir="dataset/triangle/data/"
-    # checkpoint_name='checkpoints/element-transformer-v1.0.pth'
+    checkpoint_name='checkpoints/2025_12_31_17_40_4A40.pth'
 
-    # node_input = np.load('dataset/node/data/GGB_250101T00.npy')
-    # triangle_input = np.load('dataset/triangle/data/GGB_250101T00.npy')
+    node_input = np.load('dataset/node/data/GGB_240816T00.npy')
+    triangle_input = np.load('dataset/triangle/data/GGB_240816T00.npy')
 
     # print(node_input.shape)
     # print(triangle_input.shape)
-    # node_json_file='dataset/node/json/GGB_250101T00.json'
-    # triangle_json_file='dataset/triangle/json/GGB_250101T00.json'
+    node_json_file='dataset/node/json/GGB_240816T00.json'
+    triangle_json_file='dataset/triangle/json/GGB_240816T00.json'
 
-    # output_node_npy= 'output/250101node.npy'
-    # output_triangle_npy= 'output/250101triangle.npy'
-    # node_pred, triangle_pred = predict_n_step(24, model, checkpoint_name, node_input, triangle_input,
-    #                                         node_json_file, triangle_json_file,
-    #                                         output_node_npy, output_triangle_npy, device)
-    node_file_list = sorted(os.listdir('dataset/'))
-    triangle_file_list = sorted(os.listdir('dataset/'))
-    node_target = []
-    triangle_target = []
-    for i in node_file_list:
-        if i.endswith('node.npy'):
-            print(i)
-            data = np.load('dataset/' + i)
-            print(data.shape)
-            node_target.append(data)
-        elif i.endswith('triangle.npy'):
-            print(i)
-            data = np.load('dataset/' + i)
-            print(data.shape)
-            triangle_target.append(data)
-        else:
-            print(i, 'skip')
-    node_target = np.array(node_target)
-    node_target = node_target.reshape(7 * 24, 60882, 13)
+    # node_file_list = sorted(os.listdir('dataset/'))
+    # triangle_file_list = sorted(os.listdir('dataset/'))
 
-    triangle_target = np.array(triangle_target)
-    triangle_target = triangle_target.reshape(7 * 24, 115443, 18)
-    node_pred = np.load('7-node_pred_list.npy')
-    triangle_pred = np.load('7-tri_pred_list.npy')
+    # node_target = []
+    # triangle_target = []
+    
+    # node_target = np.array(node_target)
+    # node_target = node_target.reshape(7 * 24, 60882, 13)
 
-    for i in range(1, 7):
-        print(24*(i-1), 24*i)
-        triangle_pred[24*(i-1):24*i] = processing.denormalization(triangle_pred[24*(i-1):24*i], 1, 'dataset/triangle/json/GGB_25010'+str(i)+'T00.json')
-        node_pred[24*(i-1):24*i] = processing.denormalization(node_pred[24*(i-1):24*i], 0, 'dataset/node/json/GGB_25010'+str(i)+'T00.json')
-    triangle_pred[167-23:167] = processing.denormalization(triangle_pred[167-23:167], 1, 'dataset/triangle/json/GGB_250107T00.json')
-    node_pred[167-23:167] = processing.denormalization(node_pred[167-23:167], 0, 'dataset/node/json/GGB_250107T00.json')
-    np.save('dash-triangle-pred-visualization-7days.npy', triangle_pred)
-    np.save('dash-node-pred-visualization-7days.npy', node_pred)
-    np.save('dash-triangle-target-visualization-7days.npy', triangle_target[1:,:,:])
-    np.save('dash-node-target-visualization-7days.npy', node_target[1:,:,:])
-    print(node_pred.shape)
-    print(node_target[1:,:,:].shape)
-    print(triangle_pred.shape)
-    print(triangle_target[1:,:,:].shape)
-    # img_output(node_target[1:,:,:], triangle_target[1:,:,:], node_pred, triangle_pred)
+    # triangle_target = np.array(triangle_target)
+    # triangle_target = triangle_target.reshape(7 * 24, 115443, 18)
+    node_pred = np.load('node_pred.npy')
+    triangle_pred = np.load('triangle_pred.npy')
+    
+    node_pred = processing.denormalization(node_pred, 0, node_json_file)
+    triangle_pred = processing.denormalization(triangle_pred, 1, triangle_json_file)
+
+    node_target = processing.denormalization(node_input, 0, node_json_file)[6:]
+    triangle_target = processing.denormalization(triangle_input, 1, triangle_json_file)[6:]
+
+    print(node_pred.shape, triangle_pred.shape)
+    print(node_input.shape, triangle_input.shape)
+    img_output(node_target, triangle_target, node_pred, triangle_pred)
+
+    # for i in range(1, 7):
+    #     print(24*(i-1), 24*i)
+    #     triangle_pred[24*(i-1):24*i] = processing.denormalization(triangle_pred[24*(i-1):24*i], 1, 'dataset/triangle/json/GGB_25010'+str(i)+'T00.json')
+    #     node_pred[24*(i-1):24*i] = processing.denormalization(node_pred[24*(i-1):24*i], 0, 'dataset/node/json/GGB_25010'+str(i)+'T00.json')
+    # triangle_pred[167-23:167] = processing.denormalization(triangle_pred[167-23:167], 1, 'dataset/triangle/json/GGB_250107T00.json')
+    # node_pred[167-23:167] = processing.denormalization(node_pred[167-23:167], 0, 'dataset/node/json/GGB_250107T00.json')
+    # np.save('dash-triangle-pred-visualization-7days.npy', triangle_pred)
+    # np.save('dash-node-pred-visualization-7days.npy', node_pred)
+    # np.save('dash-triangle-target-visualization-7days.npy', triangle_target[1:,:,:])
+    # np.save('dash-node-target-visualization-7days.npy', node_target[1:,:,:])
+    # print(node_pred.shape)
+    # print(node_target[1:,:,:].shape)
+    # print(triangle_pred.shape)
+    # print(triangle_target[1:,:,:].shape)
     # point_difference(node_pred[:,20000,0], node_target[1:,20000,0])
 
 
