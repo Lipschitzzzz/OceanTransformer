@@ -377,7 +377,7 @@ class CrossAttentionTransformer(nn.Module):
 
 class Encoder(nn.Module):
     def __init__(self, node=60882, triangle=115443, node_var=11,
-                 triangle_var=18, embed_dim=256, t_in=6,
+                 triangle_var=18, embed_dim=256, t_in=1,
                  mlp_ratio=4., nhead=2, num_layers=2,
                  neighbor_table=None, dropout=0.1):
         super().__init__()
@@ -415,11 +415,11 @@ class Encoder(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def forward(self, node, triangle):
+        # node = node.squeeze(0)
+        # node = node.reshape(1, node.shape[1], node.shape[0] * node.shape[2])
         node = node.squeeze(0)
-        node = node.reshape(1, node.shape[1], node.shape[0] * node.shape[2])
-        node = node.squeeze(0)
-        triangle = triangle.squeeze(0)
-        triangle = triangle.reshape(1, triangle.shape[1], triangle.shape[0] * triangle.shape[2])
+        # triangle = triangle.squeeze(0)
+        # triangle = triangle.reshape(1, triangle.shape[1], triangle.shape[0] * triangle.shape[2])
         triangle = triangle.squeeze(0)
         N_node, C_node = node.shape
         N_triangle, C_triangle = triangle.shape
