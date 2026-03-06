@@ -182,15 +182,16 @@ def train_from_pth_ddp(node_data_dir,
 
     dist.destroy_process_group()
 
-def train_zero_epoch_ddp(node_data_dir,
-    tri_data_dir,
-    num_epochs,
-    checkpoint_name_out,
-    total_timesteps=144 * 7,
-    steps_per_file=144,
-    input_steps=6,
-    pred_step=1,
-    early_stop_patience=25
+def train_zero_epoch_ddp(
+        node_data_dir,
+        triangle_data_dir,
+        num_epochs,
+        checkpoint_name_out,
+        total_timesteps=144 * 2,
+        steps_per_file=144,
+        input_steps=6,
+        pred_step=1,
+        early_stop_patience=25
 ):
     start_time = time.time()
     best_loss = float('inf')
@@ -209,18 +210,18 @@ def train_zero_epoch_ddp(node_data_dir,
     torch.cuda.set_device(local_rank)
 
     model = elementtransformer.FVCOMModel(
-        node=60882, triangle=115443, node_var=13,
-        triangle_var=18, embed_dim=256,
+        node=60882, triangle=115443, node_var=11,
+        triangle_var=15, embed_dim=256,
         mlp_ratio=4., nhead=2, num_layers=2,
         neighbor_table=None, dropout=0.1
     ).to(device)
 
     full_dataset = elementtransformer.FVCOMDataset(
         node_data_dir=node_data_dir,
-        tri_data_dir=tri_data_dir,
+        tri_data_dir=triangle_data_dir,
         total_timesteps=total_timesteps,
         steps_per_file=steps_per_file,
-        input_steps=6,
+        input_steps=input_steps,
         pred_step=pred_step
     )
 

@@ -3,11 +3,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 import os
-import math
 import processing
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import softmax
-
 
 class FVCOMDataset(Dataset):
     def __init__(
@@ -16,7 +14,7 @@ class FVCOMDataset(Dataset):
         triangle_data_dir: str,
         total_timesteps: int = 144 * 7,
         steps_per_file: int = 144,
-        input_steps: int = 6,
+        input_steps: int = 1,
         pred_step: int = 1
     ):
         self.node_data_dir = node_data_dir
@@ -26,9 +24,9 @@ class FVCOMDataset(Dataset):
         self.pred_step = pred_step
 
         self.node_files = sorted([f for f in os.listdir(node_data_dir) if f.endswith('.npy')])
-        self.tri_files = sorted([f for f in os.listdir(triangle_data_dir) if f.endswith('.npy')])
+        self.triangle_files = sorted([f for f in os.listdir(triangle_data_dir) if f.endswith('.npy')])
 
-        assert len(self.node_files) == len(self.tri_files), "Number of node and triangle files must match!"
+        assert len(self.node_files) == len(self.triangle_files), "Number of node and triangle files must match!"
         
         # expected_total = len(self.node_files) * steps_per_file
         # if total_timesteps != expected_total:
@@ -44,6 +42,15 @@ class FVCOMDataset(Dataset):
                 f"input_steps ({input_steps}) + pred_step ({pred_step}) > total_timesteps ({total_timesteps})"
             )
         self.total_samples = self.max_start_t + 1
+
+    def compute_m2(self, step):
+        hours = step * (10.0 / 60.0)
+        M2_PERIOD_HOURS = 12.4206012
+        theta = 2 * np.pi * hours / M2_PERIOD_HOURS
+        sin_val = np.sin(theta)
+        cos_val = np.cos(theta)
+        encoding = np.array([sin_val, cos_val]).astype('float32')
+        return torch.from_numpy(encoding)
 
     def _global_to_local(self, global_t: int):
         """Map global timestep to (file_index, local_timestep)."""
@@ -90,100 +97,38 @@ class FVCOMDataset(Dataset):
         t_end_input = t_start + self.input_steps
         t_target = t_end_input + self.pred_step - 1
 
-        # Load input sequence (e.g., 6 steps)
+        t_start_m2_pe = self.compute_m2(t_start)
+        t_target_m2_pe = self.compute_m2(t_target)
+        print('input idx:', t_start, 't_start_m2_pe:', t_start_m2_pe)
+        print('target idx:', t_target, 't_target_m2_pe:', t_target_m2_pe)
+    
+        # Load input sequence
         node_input = self._load_sequence(self.node_data_dir, self.node_files, t_start, self.input_steps)
-        tri_input = self._load_sequence(self.triangle_data_dir, self.tri_files, t_start, self.input_steps)
+        triangle_input = self._load_sequence(self.triangle_data_dir, self.triangle_files, t_start, self.input_steps)
 
         # Load single-step target
         node_target = self._load_sequence(self.node_data_dir, self.node_files, t_target, 1).squeeze(0)
-        tri_target = self._load_sequence(self.triangle_data_dir, self.tri_files, t_target, 1).squeeze(0)
+        triangle_target = self._load_sequence(self.triangle_data_dir, self.triangle_files, t_target, 1).squeeze(0)
+        
+        node_t_start_m2_pe_reshaped = t_start_m2_pe.view(1, 1, 2).expand(1, 60882, 2)
+        triangle_t_start_m2_pe_reshaped = t_start_m2_pe.view(1, 1, 2).expand(1, 115443, 2)
+
+        node_t_target_m2_pe_reshaped = t_target_m2_pe.view(1, 2).expand(60882, 2)
+        triangle_t_target_m2_pe_reshaped = t_target_m2_pe.view(1, 2).expand(115443, 2)
+
+        node_input_pe = torch.cat([torch.from_numpy(node_input), node_t_start_m2_pe_reshaped], dim=2)
+        triangle_input_pe = torch.cat([torch.from_numpy(triangle_input), triangle_t_start_m2_pe_reshaped], dim=2)
+        
+        node_target_pe = torch.cat([torch.from_numpy(node_target), node_t_target_m2_pe_reshaped], dim=1)
+        triangle_target_pe = torch.cat([torch.from_numpy(triangle_target), triangle_t_target_m2_pe_reshaped], dim=1)
 
         return (
-            torch.from_numpy(node_input).float(),
-            torch.from_numpy(tri_input).float()
+            node_input_pe,
+            triangle_input_pe
         ), (
-            torch.from_numpy(node_target).float(),
-            torch.from_numpy(tri_target).float()
+            node_target_pe,
+            triangle_target_pe
         )
-
-class SinusoidalPositionalEncoding(nn.Module):
-    """
-    Sinusoidal Positional Encoding from "Attention Is All You Need".
-    
-    Shape:
-        Input:  (batch_size, seq_len, d_model)
-        Output: (batch_size, seq_len, d_model)  [input + positional encoding]
-    
-    Args:
-        d_model (int): Embedding dimension.
-        max_len (int, optional): Maximum sequence length for pre-computation (for efficiency).
-                                 Even if actual seq_len > max_len, it will compute on-the-fly.
-    """
-    def __init__(self, d_model: int, max_len: int = 5000):
-        super().__init__()
-        self.d_model = d_model
-        
-        # Precompute positional encodings for positions [0, max_len)
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)  # (max_len, 1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model)
-        )  # (d_model // 2,)
-        
-        pe[:, 0::2] = torch.sin(position * div_term)  # even indices
-        pe[:, 1::2] = torch.cos(position * div_term)  # odd indices
-        
-        # Register as buffer (not a model parameter, but saved with state_dict)
-        self.register_buffer('pe', pe, persistent=False)  # persistent=False to avoid saving if not needed
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Tensor of shape (batch_size, seq_len, d_model)
-        Returns:
-            x + positional_encoding (same shape)
-        """
-        seq_len = x.size(1)
-        
-        # If sequence is longer than precomputed max_len, compute dynamically
-        if seq_len > self.pe.size(0):
-            # Recompute for the required length
-            position = torch.arange(0, seq_len, dtype=torch.float, device=x.device).unsqueeze(1)
-            div_term = torch.exp(
-                torch.arange(0, self.d_model, 2, dtype=torch.float, device=x.device) 
-                * (-math.log(10000.0) / self.d_model)
-            )
-            pe_dynamic = torch.zeros(seq_len, self.d_model, device=x.device)
-            pe_dynamic[:, 0::2] = torch.sin(position * div_term)
-            pe_dynamic[:, 1::2] = torch.cos(position * div_term)
-            pe_to_use = pe_dynamic
-        else:
-            pe_to_use = self.pe[:seq_len]
-
-        # Add positional encoding (broadcast over batch)
-        return x + pe_to_use.unsqueeze(0)
-
-class WeightedMAEMSELoss(nn.Module):
-    def __init__(self, weight_mae=1.0, weight_mse=0.2, var=10, weight_list = torch.ones(1)):
-        super().__init__()
-        self.weight_mae = weight_mae
-        self.weight_mse = weight_mse
-        self.var = var
-
-        channel_weights = torch.ones(var)
-        channel_weights = weight_list
-        self.register_buffer('channel_weights', channel_weights)
-
-    def forward(self, pred, target):
-        weights = self.channel_weights.view([1] * (pred.dim() - 1) + [-1])
-        abs_error = torch.abs(pred - target)
-        squared_error = (pred - target) ** 2
-        weighted_abs_error = weights * abs_error
-        weighted_squared_error = weights * squared_error
-        mae = weighted_abs_error.mean()
-        mse = weighted_squared_error.mean()
-        loss = self.weight_mae * mae + self.weight_mse * mse
-        return loss
 
 class NodeSparseSelfAttention(MessagePassing):
     def __init__(self, in_channels, out_channels):
@@ -377,7 +322,7 @@ class CrossAttentionTransformer(nn.Module):
 
 class Encoder(nn.Module):
     def __init__(self, node=60882, triangle=115443, node_var=11,
-                 triangle_var=18, embed_dim=256, t_in=6,
+                 triangle_var=18, embed_dim=256, t_in=1,
                  mlp_ratio=4., nhead=2, num_layers=2,
                  neighbor_table=None, dropout=0.1):
         super().__init__()
@@ -416,11 +361,14 @@ class Encoder(nn.Module):
 
     def forward(self, node, triangle):
         node = node.squeeze(0)
+        print(node.shape)
         node = node.reshape(1, node.shape[1], node.shape[0] * node.shape[2])
         node = node.squeeze(0)
         triangle = triangle.squeeze(0)
+        print(triangle.shape)
         triangle = triangle.reshape(1, triangle.shape[1], triangle.shape[0] * triangle.shape[2])
         triangle = triangle.squeeze(0)
+
         N_node, C_node = node.shape
         N_triangle, C_triangle = triangle.shape
         assert N_node == self.node, f"Expected {self.node} nodes, got {N_node}"
@@ -515,4 +463,3 @@ def FVCOMModel(node=60882, triangle=115443, node_var=13,
 
 if __name__ == "__main__":
     pass
-    

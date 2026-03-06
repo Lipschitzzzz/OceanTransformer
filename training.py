@@ -12,12 +12,12 @@ def training_test():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     N_node = 60882
     N_tri = 115443
-    node_in_dim = 13
-    triangle_in_dim = 18
+    node_in_dim = 11
+    triangle_in_dim = 15
     embed_dim = 256
 
-    node_feat = torch.randn(6, N_node, node_in_dim).to(device)
-    triangle_feat = torch.randn(6, N_tri, triangle_in_dim).to(device)
+    node_feat = torch.randn(1, N_node, node_in_dim).to(device)
+    triangle_feat = torch.randn(1, N_tri, triangle_in_dim).to(device)
 
     print(f"Input shapes:")
     print(f"node_feat: {node_feat.shape}")
@@ -40,12 +40,12 @@ def training_test():
 
 def training(
     node_data_dir,
-    tri_data_dir,
+    triangle_data_dir,
     num_epochs,
     checkpoint_name_out,
     total_timesteps=144 * 2,
     steps_per_file=144,
-    input_steps=6,
+    input_steps=1,
     pred_step=1,
     batch_size=1,
     early_stop_patience=25
@@ -58,14 +58,12 @@ def training(
 
     full_dataset = elementtransformer.FVCOMDataset(
         node_data_dir=node_data_dir,
-        tri_data_dir=tri_data_dir,
+        triangle_data_dir=triangle_data_dir,
         total_timesteps=total_timesteps,
         steps_per_file=steps_per_file,
-        input_steps=6,
+        input_steps=input_steps,
         pred_step=pred_step
     )
-    x_node, x_tri = full_dataset[142][0]   # t=142~147 (crosses file0→file1)
-    print(x_node.shape)
     total_samples = len(full_dataset)
     train_size = int(0.8 * total_samples)
     val_size = total_samples - train_size
@@ -76,18 +74,18 @@ def training(
     train_dataset = Subset(full_dataset, train_indices)
     val_dataset = Subset(full_dataset, val_indices)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
     model = elementtransformer.FVCOMModel(
-        node=60882, triangle=115443, node_var=13,
-        triangle_var=18, embed_dim=256,
+        node=60882, triangle=115443, node_var=11+2,
+        triangle_var=15+2, embed_dim=256,
         mlp_ratio=4., nhead=2, num_layers=2,
         neighbor_table=None, dropout=0.1
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    criterion = elementtransformer.WeightedMAEMSELoss().to(device)
+    criterion = torch.nn.MSELoss().to(device)
 
     for epoch in range(num_epochs):
         model.train()
@@ -179,17 +177,14 @@ def training(
 if __name__ == "__main__":
     start_time = time.time()
     timestamp_str = time.strftime("%Y_%m_%d_%H_%M", time.localtime(start_time))
-    training_test()
-
-    
-
-    # training(
-    #     node_data_dir="dataset/node/data/",
-    #     tri_data_dir="dataset/triangle/data/",
-    #     num_epochs=100,
-    #     checkpoint_name_out="checkpoints/" + timestamp_str+ "_best_model.pth",
-    #     total_timesteps=144*2,
-    #     input_steps=6,
-    #     pred_step=1,
-    #     batch_size=1)
+    # training_test()
+    training(
+        node_data_dir="dataset/node/data/",
+        triangle_data_dir="dataset/triangle/data/",
+        num_epochs=100,
+        checkpoint_name_out="checkpoints/" + timestamp_str+ "_best_model.pth",
+        total_timesteps=144*2,
+        input_steps=1,
+        pred_step=1,
+        batch_size=1)
     

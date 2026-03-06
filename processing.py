@@ -3,6 +3,7 @@ import numpy as np
 import os
 import json
 import torch
+from tqdm import tqdm  # 用于显示进度条，需安装: pip install tqdm
 
 def normalization(data, output_name, json_path):
     # data (144, 115443, 18)
@@ -98,6 +99,44 @@ def nc2npy(nc_path_in):
         # np.save('240506triangle.npy', transposed_triangle)
         ds.close()
 
+def global_normalization(input_file_path, json_file, output_file_path):
+    files = sorted([f for f in os.listdir(input_file_path) if f.endswith('.npy')])
+    sample_data = np.load(input_file_path + files[0], mmap_mode='r')
+    T, N, C = sample_data.shape
+    print(C)
+    global_min = np.full(C, np.inf)
+    global_max = np.full(C, -np.inf)
+    print("...")
+    for f in files:
+        data = np.load(input_file_path + f, mmap_mode='r')
+        print(data.shape, f)
+
+        current_min = data.min(axis=(0, 1))
+        current_max = data.max(axis=(0, 1))
+        print(current_min.shape, f)
+        
+        global_min = np.minimum(global_min, current_min)
+        global_max = np.maximum(global_max, current_max)
+
+    print("#########")
+    for i in range(C):
+        print(f"   var {i}: Min = {global_min[i]:.4f}, Max = {global_max[i]:.4f}")
+    norm_params = {
+        "mins": global_min.tolist(),
+        "maxs": global_max.tolist()
+    }
+    with open(json_file, 'w') as j:
+        json.dump(norm_params, j, indent=4)
+    print(f"Normalization parameters saved to {json_file}")
+
+    for f in files:
+        data = np.load(input_file_path + f)
+        data_norm = (data - global_min) / (global_max - global_min)
+        print(data_norm.min())
+        print(data_norm.max())
+        
+        np.save(output_file_path + f, data_norm.astype(np.float32))
+
 def npy_normalization(data_in, data_out, json_out):
     npy_file = os.listdir(data_in)
     for i in npy_file:
@@ -189,14 +228,16 @@ def merge_min_max_from_jsons(file_paths):
 
 if __name__ == "__main__":
     # nc2npy('dataset/nc')
-    files = os.listdir('dataset/7-json/triangle')
-    print(files)
-    try:
-        result = merge_min_max_from_jsons(files)
-        # 可选：保存结果到新文件
-        with open("dataset/7-json/triangle/averaged_stats_triangle.json", "w") as f:
-            json.dump(result, f, indent=4)
-        print("saved averaged_stats.json")
-    except Exception as e:
-        print("error: ", e)
+    # files = os.listdir('dataset/7-json/triangle')
+    global_normalization('dataset/triangle/', 'dataset/triangle/triangle_normalization.json', 'dataset/triangle/data/')
+    # print(files)
+    # try:
+    #     result = merge_min_max_from_jsons(files)
+    #     with open("dataset/7-json/triangle/averaged_stats_triangle.json", "w") as f:
+    #         json.dump(result, f, indent=4)
+    #     print("saved averaged_stats.json")
+    # except Exception as e:
+    #     print("error: ", e)
     # npy_normalization('D:/FVCOM/1hour/data', 'D:/FVCOM/1hour/normalized_data', 'D:/FVCOM/1hour/json')
+    # for var in ds.data_vars:
+    #     print(f"- {var}: di {ds[var].dims}, at {ds[var].attrs.get('long_name', 'no')}")
