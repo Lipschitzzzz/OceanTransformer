@@ -270,7 +270,7 @@ def train_zero_epoch_ddp(
         model.train()
         train_loss_sum = torch.tensor(0.0, device=device)
         train_loss_node = torch.tensor(0.0, device=device)
-        train_loss_tri = torch.tensor(0.0, device=device)
+        train_loss_triangle = torch.tensor(0.0, device=device)
         train_count = torch.tensor(0.0, device=device)
         iter = 0
         for (node_x, tri_x), (node_y, tri_y) in train_loader:
@@ -291,7 +291,7 @@ def train_zero_epoch_ddp(
             loss = loss_node + loss_triangle
             train_loss_sum += loss.detach()
             train_loss_node += loss_node.detach()
-            train_loss_tri += loss_tri.detach()
+            train_loss_triangle += loss_triangle.detach()
             train_count += 1
             iter += 1
 
@@ -302,19 +302,19 @@ def train_zero_epoch_ddp(
 
         dist.all_reduce(train_loss_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(train_loss_node, op=dist.ReduceOp.SUM)
-        dist.all_reduce(train_loss_tri, op=dist.ReduceOp.SUM)
+        dist.all_reduce(train_loss_triangle, op=dist.ReduceOp.SUM)
         dist.all_reduce(train_count, op=dist.ReduceOp.SUM)
 
         train_loss = (train_loss_sum / train_count).item()
         train_loss_1 = (train_loss_node / train_count).item()
-        train_loss_2 = (train_loss_tri / train_count).item()
+        train_loss_2 = (train_loss_triangle / train_count).item()
 
 
 
         model.eval()
         val_loss_sum = torch.tensor(0.0, device=device)
         val_loss_node = torch.tensor(0.0, device=device)
-        val_loss_tri = torch.tensor(0.0, device=device)
+        val_loss_triangle = torch.tensor(0.0, device=device)
         val_count = torch.tensor(0.0, device=device)
         iter = 0
         with torch.no_grad():
@@ -325,8 +325,8 @@ def train_zero_epoch_ddp(
                 node_pred, tri_pred = model(node_x, tri_x)
                 
                 loss_node = criterion(node_pred, node_y)
-                loss_tri = criterion(tri_pred, tri_y)
-                loss = loss_node + loss_tri
+                loss_triangle = criterion(tri_pred, tri_y)
+                loss = loss_node + loss_triangle
                 if local_rank == 0 and iter % 20 == 0:
                     print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "input node:      ", node_x.shape)
                     print("GPU:", str(local_rank), "Validation:", val_size, iter, "epoch:", epoch+1, '-', iter, "input triangle:  ", tri_x.shape)
@@ -337,18 +337,18 @@ def train_zero_epoch_ddp(
 
                 val_loss_sum += loss.detach()
                 val_loss_node += loss_node.detach()
-                val_loss_tri += loss_tri.detach()
+                val_loss_tri += loss_triangle.detach()
 
                 val_count += 1
                 iter += 1
 
         dist.all_reduce(val_loss_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(val_loss_node, op=dist.ReduceOp.SUM)
-        dist.all_reduce(val_loss_tri, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_loss_triangle, op=dist.ReduceOp.SUM)
         dist.all_reduce(val_count, op=dist.ReduceOp.SUM)
         val_loss = (val_loss_sum / val_count).item()
         val_loss_1 = (val_loss_node / val_count).item()
-        val_loss_2 = (val_loss_tri / val_count).item()
+        val_loss_2 = (val_loss_triangle / val_count).item()
 
         if local_rank == 0:
             print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}, Best: {best_loss:.6f}")
