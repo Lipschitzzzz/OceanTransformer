@@ -99,8 +99,8 @@ class FVCOMDataset(Dataset):
 
         t_start_m2_pe = self.compute_m2(t_start)
         t_target_m2_pe = self.compute_m2(t_target)
-        print('input idx:', t_start, 't_start_m2_pe:', t_start_m2_pe)
-        print('target idx:', t_target, 't_target_m2_pe:', t_target_m2_pe)
+        # print('input idx:', t_start, 't_start_m2_pe:', t_start_m2_pe)
+        # print('target idx:', t_target, 't_target_m2_pe:', t_target_m2_pe)
     
         # Load input sequence
         node_input = self._load_sequence(self.node_data_dir, self.node_files, t_start, self.input_steps)
@@ -361,11 +361,11 @@ class Encoder(nn.Module):
 
     def forward(self, node, triangle):
         node = node.squeeze(0)
-        print(node.shape)
+        # print(node.shape)
         node = node.reshape(1, node.shape[1], node.shape[0] * node.shape[2])
         node = node.squeeze(0)
         triangle = triangle.squeeze(0)
-        print(triangle.shape)
+        # print(triangle.shape)
         triangle = triangle.reshape(1, triangle.shape[1], triangle.shape[0] * triangle.shape[2])
         triangle = triangle.squeeze(0)
 
