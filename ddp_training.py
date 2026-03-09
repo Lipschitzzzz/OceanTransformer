@@ -337,7 +337,7 @@ def train_zero_epoch_ddp(
 
                 val_loss_sum += loss.detach()
                 val_loss_node += loss_node.detach()
-                val_loss_tri += loss_triangle.detach()
+                val_loss_triangle += loss_triangle.detach()
 
                 val_count += 1
                 iter += 1
