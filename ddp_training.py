@@ -257,10 +257,11 @@ def train_zero_epoch_ddp(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
 
     # criterion = elementtransformer.WeightedMAEMSELoss().to(device)
-    criterion = torch.nn.MSELoss()
+    # criterion = torch.nn.MSELoss()
 
     # huber = torch.nn.HuberLoss(delta=0.1, reduction='mean').to(device)
     # mae = torch.nn.L1Loss(reduction='mean').to(device)
+    criterion = torch.nn.L1Loss(reduction='mean').to(device)
 
     # W_tri = 1.0
     # W_node = 0.3
