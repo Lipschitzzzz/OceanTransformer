@@ -210,8 +210,8 @@ def train_zero_epoch_ddp(
     torch.cuda.set_device(local_rank)
 
     model = elementtransformer.FVCOMModel(
-        node=60882, triangle=115443, node_var=11+2,
-        triangle_var=15+2, embed_dim=256,
+        node=60882, triangle=115443, node_var=11,
+        triangle_var=15, embed_dim=256,
         mlp_ratio=4., nhead=2, num_layers=2,
         neighbor_table=None, dropout=0.1
     ).to(device)
