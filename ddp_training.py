@@ -218,7 +218,7 @@ def train_zero_epoch_ddp(
 
     full_dataset = elementtransformer.FVCOMDataset(
         node_data_dir=node_data_dir,
-        tri_data_dir=triangle_data_dir,
+        triangle_data_dir=triangle_data_dir,
         total_timesteps=total_timesteps,
         steps_per_file=steps_per_file,
         input_steps=input_steps,
@@ -419,12 +419,12 @@ def main():
     start_time = time.time()
     timestamp_str = time.strftime("%Y_%m_%d_%H_%M", time.localtime(start_time))
     train_zero_epoch_ddp(node_data_dir="dataset/node/data/",
-    tri_data_dir="dataset/triangle/data/",
-    num_epochs=200,
-    checkpoint_name_out="checkpoints/" + timestamp_str+ "_ddp_training.pth",
-    total_timesteps=144*7,
-    input_steps=1,
-    pred_step=36)
+                         triangle_data_dir="dataset/triangle/data/",
+                         num_epochs=200,
+                         checkpoint_name_out="checkpoints/" + timestamp_str+ "_ddp_training.pth",
+                         total_timesteps=144*7,
+                         input_steps=1,
+                         pred_step=36)
     # train_from_pth_ddp(node_data_dir="dataset/node/data/",
     #                    tri_data_dir="dataset/triangle/data/",
     #                    num_epochs=100,
