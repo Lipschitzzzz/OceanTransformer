@@ -187,9 +187,9 @@ def train_zero_epoch_ddp(
         triangle_data_dir,
         num_epochs,
         checkpoint_name_out,
-        total_timesteps=144 * 2,
+        total_timesteps=144 * 7,
         steps_per_file=144,
-        input_steps=6,
+        input_steps=1,
         pred_step=1,
         early_stop_patience=25
 ):
@@ -210,8 +210,8 @@ def train_zero_epoch_ddp(
     torch.cuda.set_device(local_rank)
 
     model = elementtransformer.FVCOMModel(
-        node=60882, triangle=115443, node_var=11,
-        triangle_var=15, embed_dim=256,
+        node=60882, triangle=115443, node_var=11+2,
+        triangle_var=15+2, embed_dim=256,
         mlp_ratio=4., nhead=2, num_layers=2,
         neighbor_table=None, dropout=0.1
     ).to(device)
@@ -256,7 +256,8 @@ def train_zero_epoch_ddp(
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
 
-    criterion = elementtransformer.WeightedMAEMSELoss().to(device)
+    # criterion = elementtransformer.WeightedMAEMSELoss().to(device)
+    criterion = torch.nn.MSELoss()
 
     # huber = torch.nn.HuberLoss(delta=0.1, reduction='mean').to(device)
     # mae = torch.nn.L1Loss(reduction='mean').to(device)
@@ -420,10 +421,10 @@ def main():
     train_zero_epoch_ddp(node_data_dir="dataset/node/data/",
     tri_data_dir="dataset/triangle/data/",
     num_epochs=200,
-    checkpoint_name_out="checkpoints/" + timestamp_str+ "_2A100.pth",
-    total_timesteps=144,
-    input_steps=6,
-    pred_step=1)
+    checkpoint_name_out="checkpoints/" + timestamp_str+ "_ddp_training.pth",
+    total_timesteps=144*7,
+    input_steps=1,
+    pred_step=36)
     # train_from_pth_ddp(node_data_dir="dataset/node/data/",
     #                    tri_data_dir="dataset/triangle/data/",
     #                    num_epochs=100,
