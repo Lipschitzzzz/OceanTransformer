@@ -113,21 +113,21 @@ class FVCOMDataset(Dataset):
         node_t_start_m2_pe_reshaped = t_start_m2_pe.view(1, 1, 2).expand(1, 60882, 2)
         triangle_t_start_m2_pe_reshaped = t_start_m2_pe.view(1, 1, 2).expand(1, 115443, 2)
 
-        node_t_target_m2_pe_reshaped = t_target_m2_pe.view(1, 2).expand(60882, 2)
-        triangle_t_target_m2_pe_reshaped = t_target_m2_pe.view(1, 2).expand(115443, 2)
+        # node_t_target_m2_pe_reshaped = t_target_m2_pe.view(1, 2).expand(60882, 2)
+        # triangle_t_target_m2_pe_reshaped = t_target_m2_pe.view(1, 2).expand(115443, 2)
 
         node_input_pe = torch.cat([torch.from_numpy(node_input), node_t_start_m2_pe_reshaped], dim=2)
         triangle_input_pe = torch.cat([torch.from_numpy(triangle_input), triangle_t_start_m2_pe_reshaped], dim=2)
         
-        node_target_pe = torch.cat([torch.from_numpy(node_target), node_t_target_m2_pe_reshaped], dim=1)
-        triangle_target_pe = torch.cat([torch.from_numpy(triangle_target), triangle_t_target_m2_pe_reshaped], dim=1)
+        # node_target_pe = torch.cat([torch.from_numpy(node_target), node_t_target_m2_pe_reshaped], dim=1)
+        # triangle_target_pe = torch.cat([torch.from_numpy(triangle_target), triangle_t_target_m2_pe_reshaped], dim=1)
 
         return (
             node_input_pe,
             triangle_input_pe
         ), (
-            node_target_pe,
-            triangle_target_pe
+            node_target,
+            triangle_target
         )
 
 class NodeSparseSelfAttention(MessagePassing):
@@ -414,8 +414,8 @@ class ElementTransformerNet(nn.Module):
                  neighbor_table=None, dropout=0.1):
         super().__init__()
         self.encoder = Encoder(
-            node_var=node_var,
-            triangle_var=triangle_var,
+            node_var=node_var+2,
+            triangle_var=triangle_var+2,
             embed_dim=embed_dim,
             node=node,
             triangle=triangle,

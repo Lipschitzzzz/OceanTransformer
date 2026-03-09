@@ -78,8 +78,8 @@ def training(
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
     model = elementtransformer.FVCOMModel(
-        node=60882, triangle=115443, node_var=11+2,
-        triangle_var=15+2, embed_dim=256,
+        node=60882, triangle=115443, node_var=11,
+        triangle_var=15, embed_dim=256,
         mlp_ratio=4., nhead=2, num_layers=2,
         neighbor_table=None, dropout=0.1
     ).to(device)
@@ -183,7 +183,7 @@ if __name__ == "__main__":
         triangle_data_dir="dataset/triangle/data/",
         num_epochs=100,
         checkpoint_name_out="checkpoints/" + timestamp_str+ "_best_model.pth",
-        total_timesteps=144*2,
+        total_timesteps=10,
         input_steps=1,
         pred_step=1,
         batch_size=1)
