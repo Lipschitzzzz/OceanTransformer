@@ -261,7 +261,8 @@ def train_zero_epoch_ddp(
 
     # huber = torch.nn.HuberLoss(delta=0.1, reduction='mean').to(device)
     # mae = torch.nn.L1Loss(reduction='mean').to(device)
-    criterion = torch.nn.L1Loss(reduction='mean').to(device)
+    # criterion = torch.nn.L1Loss(reduction='mean').to(device)
+    criterion = torch.nn.SmoothL1Loss(beta=1.0)
 
     # W_tri = 1.0
     # W_node = 0.3
