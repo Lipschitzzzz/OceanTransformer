@@ -97,8 +97,8 @@ class FVCOMDataset(Dataset):
         t_end_input = t_start + self.input_steps
         t_target = t_end_input + self.pred_step - 1
 
-        t_start_m2_pe = self.compute_m2(t_start)
-        t_target_m2_pe = self.compute_m2(t_target)
+        # t_start_m2_pe = self.compute_m2(t_start)
+        # t_target_m2_pe = self.compute_m2(t_target)
         # print('input idx:', t_start, 't_start_m2_pe:', t_start_m2_pe)
         # print('target idx:', t_target, 't_target_m2_pe:', t_target_m2_pe)
     
@@ -110,21 +110,21 @@ class FVCOMDataset(Dataset):
         node_target = self._load_sequence(self.node_data_dir, self.node_files, t_target, 1).squeeze(0)
         triangle_target = self._load_sequence(self.triangle_data_dir, self.triangle_files, t_target, 1).squeeze(0)
         
-        node_t_start_m2_pe_reshaped = t_start_m2_pe.view(1, 1, 2).expand(1, 60882, 2)
-        triangle_t_start_m2_pe_reshaped = t_start_m2_pe.view(1, 1, 2).expand(1, 115443, 2)
+        # node_t_start_m2_pe_reshaped = t_start_m2_pe.view(1, 1, 2).expand(1, 60882, 2)
+        # triangle_t_start_m2_pe_reshaped = t_start_m2_pe.view(1, 1, 2).expand(1, 115443, 2)
 
         # node_t_target_m2_pe_reshaped = t_target_m2_pe.view(1, 2).expand(60882, 2)
         # triangle_t_target_m2_pe_reshaped = t_target_m2_pe.view(1, 2).expand(115443, 2)
 
-        node_input_pe = torch.cat([torch.from_numpy(node_input), node_t_start_m2_pe_reshaped], dim=2)
-        triangle_input_pe = torch.cat([torch.from_numpy(triangle_input), triangle_t_start_m2_pe_reshaped], dim=2)
+        # node_input_pe = torch.cat([torch.from_numpy(node_input), node_t_start_m2_pe_reshaped], dim=2)
+        # triangle_input_pe = torch.cat([torch.from_numpy(triangle_input), triangle_t_start_m2_pe_reshaped], dim=2)
         
         # node_target_pe = torch.cat([torch.from_numpy(node_target), node_t_target_m2_pe_reshaped], dim=1)
         # triangle_target_pe = torch.cat([torch.from_numpy(triangle_target), triangle_t_target_m2_pe_reshaped], dim=1)
 
         return (
-            node_input_pe,
-            triangle_input_pe
+            node_input,
+            triangle_input
         ), (
             node_target,
             triangle_target
