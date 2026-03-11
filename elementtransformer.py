@@ -414,8 +414,8 @@ class ElementTransformerNet(nn.Module):
                  neighbor_table=None, dropout=0.1):
         super().__init__()
         self.encoder = Encoder(
-            node_var=node_var+2,
-            triangle_var=triangle_var+2,
+            node_var=node_var,
+            triangle_var=triangle_var,
             embed_dim=embed_dim,
             node=node,
             triangle=triangle,
